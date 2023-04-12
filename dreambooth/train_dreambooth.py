@@ -51,6 +51,7 @@ from dreambooth.utils.model_utils import (
     enable_safe_unpickle,
     xformerify,
     torch2ify,
+    handle_rotary_attention
 )
 from dreambooth.utils.text_utils import encode_hidden_state
 from dreambooth.utils.utils import cleanup, printm, verify_locon_installed
@@ -568,6 +569,8 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             factor=args.lr_factor,
             scale_pos=lr_scale_pos,
         )
+
+        handle_rotary_attention(unet, True, use_xformers=(args.attention == 'xformers') )
 
         # create ema, fix OOM
         if args.use_ema:

@@ -11,6 +11,17 @@ from transformers import PretrainedConfig
 from dreambooth import shared  # noqa
 from dreambooth.dataclasses.db_config import DreamboothConfig  # noqa
 from dreambooth.utils.utils import cleanup  # noqa
+from rotary_embedding_torch import RotaryEmbedding
+from diffusers.models.attention import Attention, BasicTransformerBlock
+
+if is_xformers_available():
+    import xformers
+    import xformers.ops
+    from xformers.ops import MemoryEfficientAttentionFlashAttentionOp
+else:
+    MemoryEfficientAttentionFlashAttentionOp = None
+    xformers = None
+
 
 checkpoints_list = {}
 checkpoint_alisases = {}
@@ -84,7 +95,59 @@ class CheckpointInfo:
 
         return self.shorthash
 
+class RotaryAttentionProcessor:
+    def __init__(self, rotary_emb=None, use_xformers=False):
+        self.rotary_emb = rotary_emb
+        self.attention_op = MemoryEfficientAttentionFlashAttentionOp
+        self.use_xformers = use_xformers
 
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None
+    ):
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+        query = attn.to_q(hidden_states)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        elif attn.cross_attention_norm:
+            encoder_hidden_states = attn.norm_cross(encoder_hidden_states)
+
+        key = attn.to_k(encoder_hidden_states)
+
+        query =  self.rotary_emb.rotate_queries_or_keys(query)
+        key = self.rotary_emb.rotate_queries_or_keys(key)
+    
+        value = attn.to_v(encoder_hidden_states)
+
+        query = attn.head_to_batch_dim(query)
+        key = attn.head_to_batch_dim(key)
+        
+        value = attn.head_to_batch_dim(value)
+
+        if self.use_xformers and self.attention_op is not None:
+            hidden_states = xformers.ops.memory_efficient_attention(
+                query, key, value, attn_bias=attention_mask, op=self.attention_op, scale=self.attn.scale
+            )
+        else:
+            attention_probs = attn.get_attention_scores(query, key, attention_mask)
+            hidden_states = torch.bmm(attention_probs, value)
+
+        hidden_states = attn.batch_to_head_dim(hidden_states)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        return hidden_states
+        
 def list_models():
     checkpoints_list.clear()
     checkpoint_alisases.clear()
@@ -250,3 +313,17 @@ def torch2ify(unet):
         except:
             pass
     return unet
+
+def handle_rotary_attention(model, use_rotary_embed=False, use_xformers=False):
+    if use_rotary_embed:
+        rotary_emb = RotaryEmbedding(dim=32).to('cuda', dtype=model.dtype)
+        applied = 0
+        for m in model.modules():
+            if isinstance(m, torch.nn.ModuleList):
+                for module in m:
+                    if isinstance(module, BasicTransformerBlock):
+                        module.attn1.set_processor(RotaryAttentionProcessor(rotary_emb=rotary_emb, use_xformers=use_xformers))
+                        module.attn2.set_processor(RotaryAttentionProcessor(rotary_emb=rotary_emb, use_xformers=use_xformers))
+                        applied += 1
+                
+        if applied > 0: print(f"{applied} Attention layers have rotary attention.")
