@@ -12,7 +12,8 @@ from dreambooth import shared  # noqa
 from dreambooth.dataclasses.db_config import DreamboothConfig  # noqa
 from dreambooth.utils.utils import cleanup  # noqa
 from rotary_embedding_torch import RotaryEmbedding
-from diffusers.models.attention import Attention, BasicTransformerBlock
+from diffusers.models.attention import BasicTransformerBlock
+from diffusers.models.attention_processor import Attention
 
 if is_xformers_available():
     import xformers
@@ -134,7 +135,7 @@ class RotaryAttentionProcessor:
 
         if self.use_xformers and self.attention_op is not None:
             hidden_states = xformers.ops.memory_efficient_attention(
-                query, key, value, attn_bias=attention_mask, op=self.attention_op, scale=self.attn.scale
+                query, key, value, attn_bias=attention_mask, op=self.attention_op, scale=attn.scale
             )
         else:
             attention_probs = attn.get_attention_scores(query, key, attention_mask)
@@ -325,15 +326,15 @@ def torch2ify(unet):
     return unet
 
 def handle_rotary_attention(model, use_rotary_embed=False, use_xformers=False):
+    applied = 0
     if use_rotary_embed:
-        rotary_emb = RotaryEmbedding(dim=32).to('cuda', dtype=model.dtype)
-        applied = 0
+        rotary_emb = RotaryEmbedding(dim=8).cuda()
+        model.set_attn_processor(
+            RotaryAttentionProcessor(rotary_emb=rotary_emb)
+        )
         for m in model.modules():
             if isinstance(m, torch.nn.ModuleList):
                 for module in m:
                     if isinstance(module, BasicTransformerBlock):
-                        module.attn1.set_processor(RotaryAttentionProcessor(rotary_emb=rotary_emb, use_xformers=use_xformers))
-                        module.attn2.set_processor(RotaryAttentionProcessor(rotary_emb=rotary_emb, use_xformers=use_xformers))
-                        applied += 1
-                
+                        applied += 1              
         if applied > 0: print(f"{applied} Attention layers have rotary attention.")
