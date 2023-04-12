@@ -16,6 +16,7 @@ import torch
 import torch.backends.cuda
 import torch.backends.cudnn
 import torch.utils.checkpoint
+import tomesd
 from accelerate import Accelerator
 from accelerate.utils.random import set_seed as set_seed2
 from diffusers import (
@@ -65,6 +66,7 @@ from lora_diffusion.lora import (
     save_lora_weight,
     TEXT_ENCODER_DEFAULT_TARGET_REPLACE,
     get_target_module,
+    set_lora_requires_grad,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,12 +104,20 @@ diffusers_dir = ""
 try:
     from core.handlers.config import ConfigHandler
     from core.handlers.models import ModelHandler
+
     ch = ConfigHandler()
     mh = ModelHandler()
     export_diffusers = ch.get_item("export_diffusers", "dreambooth", True)
     diffusers_dir = os.path.join(mh.models_path, "diffusers")
 except:
     pass
+
+
+def dadapt(optimizer):
+    if optimizer == "AdamW Dadaptation" or optimizer == "Adan Dadaptation":
+        return True
+    else:
+        return False
 
 
 def set_seed(deterministic: bool):
@@ -243,7 +253,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             vae_path = (
                 args.pretrained_vae_name_or_path
                 if args.pretrained_vae_name_or_path
-                else args.pretrained_model_name_or_path
+                else args.get_pretrained_model_name_or_path()
             )
             disable_safe_unpickle()
             new_vae = AutoencoderKL.from_pretrained(
@@ -259,19 +269,19 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
         disable_safe_unpickle()
         # Load the tokenizer
         tokenizer = AutoTokenizer.from_pretrained(
-            os.path.join(args.pretrained_model_name_or_path, "tokenizer"),
+            os.path.join(args.get_pretrained_model_name_or_path(), "tokenizer"),
             revision=args.revision,
             use_fast=False,
         )
 
         # import correct text encoder class
         text_encoder_cls = import_model_class_from_model_name_or_path(
-            args.pretrained_model_name_or_path, args.revision
+            args.get_pretrained_model_name_or_path(), args.revision
         )
 
         # Load models and create wrapper for stable diffusion
         text_encoder = text_encoder_cls.from_pretrained(
-            args.pretrained_model_name_or_path,
+            args.get_pretrained_model_name_or_path(),
             subfolder="text_encoder",
             revision=args.revision,
             torch_dtype=torch.float32,
@@ -281,7 +291,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
         printm("Created vae")
 
         unet = UNet2DConditionModel.from_pretrained(
-            args.pretrained_model_name_or_path,
+            args.get_pretrained_model_name_or_path(),
             subfolder="unet",
             revision=args.revision,
             torch_dtype=torch.float32,
@@ -323,20 +333,6 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                 f" {low_precision_error_string}"
             )
 
-        # Enable TF32 for faster training on Ampere GPUs,
-        # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
-        try:
-            # Apparently, some versions of torch don't have a cuda_version flag? IDK, but it breaks my runpod.
-            if (
-                    torch.cuda.is_available()
-                    and float(torch.cuda_version) >= 11.0
-                    and args.tf32_enable
-            ):
-                print("Attempting to enable TF32.")
-                torch.backends.cuda.matmul.allow_tf32 = True
-        except:
-            pass
-
         if args.gradient_checkpointing:
             if args.train_unet:
                 unet.enable_gradient_checkpointing()
@@ -351,13 +347,13 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
         if args.use_ema:
             if os.path.exists(
                     os.path.join(
-                        args.pretrained_model_name_or_path,
+                        args.get_pretrained_model_name_or_path(),
                         "ema_unet",
                         "diffusion_pytorch_model.safetensors",
                     )
             ):
                 ema_unet = UNet2DConditionModel.from_pretrained(
-                    args.pretrained_model_name_or_path,
+                    args.get_pretrained_model_name_or_path(),
                     subfolder="ema_unet",
                     revision=args.revision,
                     torch_dtype=torch.float32,
@@ -438,6 +434,13 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             params_to_optimize = unet.parameters()
 
         optimizer = get_optimizer(args, params_to_optimize)
+        if len(optimizer.param_groups) > 1:
+            try:
+                optimizer.param_groups[1]["weight_decay"] = args.tenc_weight_decay
+                optimizer.param_groups[1]["grad_clip_norm"] = args.tenc_grad_clip_norm
+            except:
+                print("Exception setting tenc weight decay")
+                traceback.print_exc()
 
         noise_scheduler = get_noise_scheduler(args)
 
@@ -494,7 +497,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             del vae
             # Preserve reference to vae for later checks
             vae = None
-        cleanup()
+
         if status.interrupted:
             result.msg = "Training interrupted."
             stop_profiler(profiler)
@@ -568,6 +571,8 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             power=args.lr_power,
             factor=args.lr_factor,
             scale_pos=lr_scale_pos,
+            unet_lr=args.lora_learning_rate,
+            tenc_lr=args.lora_txt_learning_rate,
         )
 
         handle_rotary_attention(unet, True, use_xformers=(args.attention == 'xformers') )
@@ -665,6 +670,15 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                 global_epoch = first_epoch
             except Exception as lex:
                 print(f"Exception loading checkpoint: {lex}")
+
+        # if shared.in_progress:
+        #    print("  ***** OOM detected. Resuming from last step *****")
+        #    max_train_steps = max_train_steps - shared.in_progress_step
+        #    max_train_epochs = max_train_epochs - shared.in_progress_epoch
+        #    session_epoch = shared.in_progress_epoch
+        #    text_encoder_epochs = (shared.in_progress_epoch/max_train_epochs)*text_encoder_epochs
+        # else:
+        #    shared.in_progress = True
 
         print("  ***** Running training *****")
         if shared.force_cpu:
@@ -787,7 +801,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             # Create the pipeline using the trained modules and save it.
             if accelerator.is_main_process:
                 printm("Pre-cleanup.")
-                
+
                 # Save random states so sample generation doesn't impact training.
                 if shared.device.type == 'cuda':
                     torch_rng_state = torch.get_rng_state()
@@ -795,7 +809,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                     cuda_cpu_rng_state = torch.cuda.get_rng_state(device="cpu")
 
                 optim_to(profiler, optimizer)
-                
+
                 if profiler is not None:
                     cleanup()
 
@@ -806,7 +820,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                 printm("Creating pipeline.")
 
                 s_pipeline = DiffusionPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
+                    args.get_pretrained_model_name_or_path(),
                     unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True),
                     text_encoder=accelerator.unwrap_model(
                         text_encoder, keep_fp32_wrapper=True
@@ -830,8 +844,14 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
                 s_pipeline = s_pipeline.to(accelerator.device)
 
+                printm("Patching model with tomesd.")
+                if args.tomesd:
+                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
+
                 with accelerator.autocast(), torch.inference_mode():
                     if save_model:
+                        if args.tomesd:
+                            tomesd.remove_patch(s_pipeline)
                         # We are saving weights, we need to ensure revision is saved
                         args.save()
                         try:
@@ -864,14 +884,20 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                                 if ema_model is not None:
                                     ema_model.save_pretrained(
                                         os.path.join(
-                                            args.pretrained_model_name_or_path,
+                                            args.get_pretrained_model_name_or_path(),
                                             "ema_unet",
                                         ),
                                         safe_serialization=True,
                                     )
                                 pbar.update()
 
+                                printm("Patching model with tomesd.")
+                                if args.tomesd:
+                                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
+
                             elif save_lora:
+                                if args.tomesd:
+                                    tomesd.remove_patch(s_pipeline)
                                 pbar.set_description("Saving Lora Weights...")
                                 # setup directory
                                 loras_dir = os.path.join(args.model_dir, "loras")
@@ -925,11 +951,17 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                                     compile_checkpoint(args.model_name, reload_models=False, lora_file_name=out_file,
                                                        log=False, snap_rev=snap_rev, pbar=pbar)
                                 printm("Restored, moved to acc.device.")
+
+                                printm("Patching model with tomesd.")
+                                if args.tomesd:
+                                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
+
                         except Exception as ex:
                             print(f"Exception saving checkpoint/model: {ex}")
                             traceback.print_exc()
                             pass
-
+                    if args.tomesd:
+                        tomesd.remove_patch(s_pipeline)
                     save_dir = args.model_dir
                     if save_image:
                         samples = []
@@ -958,7 +990,13 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                                     )
                                     prompts.append(epd)
                                 pbar.set_description("Generating Samples")
-                                pbar.reset(len(prompts) + 2)
+
+                                prompt_lengths = len(prompts)
+                                if args.disable_logging:
+                                    pbar.reset(prompt_lengths)
+                                else:
+                                    pbar.reset(prompt_lengths + 2)
+
                                 ci = 0
                                 for c in prompts:
                                     c.out_dir = os.path.join(args.model_dir, "samples")
@@ -989,40 +1027,48 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                                     last_prompts.append(prompt)
                                 del samples
                                 del prompts
-
+                                printm("Patching model with tomesd.")
+                                if args.tomesd:
+                                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
                         except Exception as em:
                             print(f"Exception saving sample: {em}")
                             traceback.print_exc()
                             pass
                 printm("Starting cleanup.")
+                if args.tomesd:
+                    tomesd.remove_patch(s_pipeline)
                 del s_pipeline
                 if save_image:
                     if "generator" in locals():
                         del generator
-                    try:
-                        printm("Parse logs.")
-                        log_images, log_names = log_parser.parse_logs(
-                            model_name=args.model_name
-                        )
-                        pbar.update()
-                        for log_image in log_images:
-                            last_samples.append(log_image)
-                        for log_name in log_names:
-                            last_prompts.append(log_name)
-                        send_training_update(
-                            last_samples,
-                            args.model_name,
-                            last_prompts,
-                            global_step,
-                            args.revision,
-                        )
 
-                        del log_images
-                        del log_names
-                    except Exception as l:
-                        traceback.print_exc()
-                        print(f"Exception parsing logz: {l}")
-                        pass
+                    if not args.disable_logging:
+                        try:
+                            printm("Parse logs.")
+                            log_images, log_names = log_parser.parse_logs(
+                                model_name=args.model_name
+                            )
+                            pbar.update()
+                            for log_image in log_images:
+                                last_samples.append(log_image)
+                            for log_name in log_names:
+                                last_prompts.append(log_name)
+
+                            del log_images
+                            del log_names
+                        except Exception as l:
+                            traceback.print_exc()
+                            print(f"Exception parsing logz: {l}")
+                            pass
+
+                    send_training_update(
+                        last_samples,
+                        args.model_name,
+                        last_prompts,
+                        global_step,
+                        args.revision
+                    )
+
                     status.sample_prompts = last_prompts
                     status.current_image = last_samples
                     pbar.update()
@@ -1071,6 +1117,8 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
         if stop_text_percentage == 0:
             last_tenc = False
 
+        cleanup()
+
         for epoch in range(first_epoch, max_train_epochs):
             if training_complete:
                 print("Training complete, breaking epoch.")
@@ -1078,6 +1126,8 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
             if args.train_unet:
                 unet.train()
+            elif args.use_lora and not args.lora_use_buggy_requires_grad:
+                set_lora_requires_grad(unet, False)
 
             train_tenc = epoch < text_encoder_epochs
             if stop_text_percentage == 0:
@@ -1090,8 +1140,13 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
             if not args.use_lora:
                 text_encoder.requires_grad_(train_tenc)
-            elif train_tenc:
-                text_encoder.text_model.embeddings.requires_grad_(True)
+            else:
+                if args.lora_use_buggy_requires_grad:
+                    if train_tenc:
+                        text_encoder.text_model.embeddings.requires_grad_(True)
+                else:
+                    text_encoder.text_model.embeddings.requires_grad_(False)
+                    set_lora_requires_grad(text_encoder, train_tenc)
 
             if last_tenc != train_tenc:
                 last_tenc = train_tenc
@@ -1251,6 +1306,10 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
                     optimizer.zero_grad(set_to_none=args.gradient_set_to_none)
 
+                    # Track current step and epoch for OOM resume
+                    # shared.in_progress_epoch = global_epoch
+                    # shared.in_progress_steps = global_step
+
                 allocated = round(torch.cuda.memory_allocated(0) / 1024 ** 3, 1)
                 cached = round(torch.cuda.memory_reserved(0) / 1024 ** 3, 1)
                 last_lr = lr_scheduler.get_last_lr()[0]
@@ -1267,27 +1326,63 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                 del noisy_latents
                 del target
 
+                dlr_unet, dlr_tenc = None, None
+                if dadapt(args.optimizer):
+                    dlr_unet = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
+                    if len(optimizer.param_groups) > 1:
+                        try:
+                            dlr_tenc = optimizer.param_groups[1]["d"] * optimizer.param_groups[1]["lr"]
+                        except:
+                            print("Exception setting tenc weight decay")
+                            traceback.print_exc()
+
                 loss_step = loss.detach().item()
                 loss_total += loss_step
-                if args.split_loss:
-                    logs = {
-                        "lr": float(last_lr),
-                        "loss": float(loss_step),
-                        "inst_loss": float(instance_loss.detach().item()),
-                        "prior_loss": float(prior_loss.detach().item()),
-                        "vram": float(cached),
-                    }
-                else:
-                    logs = {
-                        "lr": float(last_lr),
-                        "loss": float(loss_step),
-                        "vram": float(cached),
-                    }
 
-                status.textinfo2 = (
-                    f"Loss: {'%.2f' % loss_step}, LR: {'{:.2E}'.format(Decimal(last_lr))}, "
-                    f"VRAM: {allocated}/{cached} GB"
-                )
+                if args.split_loss:
+                    if dadapt(args.optimizer):
+                        logs = {
+                            "lr": float(dlr_unet),
+                            # "dlr_tenc": float(dlr_tenc),
+                            "loss": float(loss_step),
+                            "inst_loss": float(instance_loss.detach().item()),
+                            "prior_loss": float(prior_loss.detach().item()),
+                            "vram": float(cached),
+                        }
+                    else:
+                        logs = {
+                            "lr": float(last_lr),
+                            "loss": float(loss_step),
+                            "inst_loss": float(instance_loss.detach().item()),
+                            "prior_loss": float(prior_loss.detach().item()),
+                            "vram": float(cached),
+                        }
+
+                else:
+                    if dadapt(args.optimizer):
+                        logs = {
+                            "lr": float(dlr_unet),
+                            # "dlr_tenc": float(dlr_tenc),
+                            "loss": float(loss_step),
+                            "vram": float(cached),
+                        }
+                    else:
+                        logs = {
+                            "lr": float(last_lr),
+                            "loss": float(loss_step),
+                            "vram": float(cached),
+                        }
+
+                if dlr_tenc:
+                    status.textinfo2 = (
+                        f"Loss: {'%.2f' % loss_step}, UNET DLR: {'{:.2E}'.format(Decimal(dlr_unet))}, TENC DLR: {'{:.2E}'.format(Decimal(dlr_tenc))}, "
+                        f"VRAM: {allocated}/{cached} GB"
+                    )
+                else:
+                    status.textinfo2 = (
+                        f"Loss: {'%.2f' % loss_step}, LR: {'{:.2E}'.format(Decimal(last_lr))}, "
+                        f"VRAM: {allocated}/{cached} GB"
+                    )
                 progress_bar.update(train_batch_size)
                 progress_bar.set_postfix(**logs)
                 accelerator.log(logs, step=args.revision)
@@ -1308,9 +1403,12 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
 
                 # Log completion message
                 if training_complete or status.interrupted:
+                    shared.in_progress = False
+                    shared.in_progress_step = 0
+                    shared.in_progress_epoch = 0
                     print("  Training complete (step check).")
                     if status.interrupted:
-                        state = "cancelled"
+                        state = "canceled"
                     else:
                         state = "complete"
 
@@ -1339,7 +1437,7 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
             if training_complete or status.interrupted:
                 print("  Training complete (step check).")
                 if status.interrupted:
-                    state = "cancelled"
+                    state = "canceled"
                 else:
                     state = "complete"
 
@@ -1360,6 +1458,9 @@ def main(class_gen_method: str = "Native Diffusers") -> TrainResult:
                         if status.interrupted:
                             training_complete = True
                             print("Training complete, interrupted.")
+                            shared.in_progress = False
+                            shared.in_progress_step = 0
+                            shared.in_progress_epoch = 0
                             break
                         time.sleep(1)
 

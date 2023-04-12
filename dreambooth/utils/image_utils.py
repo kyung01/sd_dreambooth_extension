@@ -43,19 +43,22 @@ def get_dim(filename, max_res):
 
 
 def rotate_image_straight(image: Image) -> Image:
-    exif: Image.Exif = image.getexif()
-    if exif:
-        orientation_tag = {v: k for k, v in ExifTags.TAGS.items()}['Orientation']
-        orientation = exif.get(orientation_tag)
-        degree = {
-            3: 180,
-            6: 270,
-            8: 90,
-        }.get(orientation)
-        if degree:
-            image = image.rotate(degree, expand=True)
-    # else:
-    #     print(f"No exif data for {image.filename}. Using default orientation.")
+    try:
+        exif: Image.Exif = image.getexif()
+        if exif:
+            orientation_tag = {v: k for k, v in ExifTags.TAGS.items()}['Orientation']
+            orientation = exif.get(orientation_tag)
+            degree = {
+                3: 180,
+                6: 270,
+                8: 90,
+            }.get(orientation)
+            if degree:
+                image = image.rotate(degree, expand=True)
+        # else:
+        #     print(f"No exif data for {image.filename}. Using default orientation.")
+    except:
+        pass
     return image
 
 
@@ -450,6 +453,11 @@ def open_and_trim(image_path: str, reso: Tuple[int, int], return_pil: bool = Fal
 
     # Convert to RGB if necessary
     if image.mode != "RGB":
+        # If given image has Alpha Channel, flatten it instead of removing A channel
+        if image.mode.endswith("A"):
+            bg = Image.new("RGB", image.size, "white")
+            bg.paste(image, mask=image.split()[3])
+            image = bg
         image = image.convert("RGB")
 
     # Upscale image if necessary
