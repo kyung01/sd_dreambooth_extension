@@ -576,8 +576,16 @@ def log_dadapt(disable: bool = True):
 def get_optimizer(args, params_to_optimize):
     try:
         if args.optimizer == "8bit AdamW":
-            from bitsandbytes.optim import AdamW8bit
+            from bitsandbytes.optim.adamw import AdamW8bit
             return AdamW8bit(
+                params_to_optimize,
+                lr=args.learning_rate,
+                weight_decay=args.weight_decay,
+            )
+            
+        elif args.optimizer == "8bit Lion":
+            from bitsandbytes.optim.lion import Lion8bit
+            return Lion8bit(
                 params_to_optimize,
                 lr=args.learning_rate,
                 weight_decay=args.weight_decay,
@@ -602,7 +610,7 @@ def get_optimizer(args, params_to_optimize):
             )
 
         elif args.optimizer == "AdanIP Dadaptation":
-            from dreambooth.dadapt_adan_ip import DAdaptAdanIP
+            from dadaptation.experimental import DAdaptAdanIP
             return DAdaptAdanIP(
                 params_to_optimize,
                 lr=args.learning_rate,
@@ -611,7 +619,7 @@ def get_optimizer(args, params_to_optimize):
             )
 
         elif args.optimizer == "Adan Dadaptation":
-            from dreambooth.dadapt_adan import DAdaptAdan
+            from dadaptation import DAdaptAdan
             return DAdaptAdan(
                 params_to_optimize,
                 lr=args.learning_rate,

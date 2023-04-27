@@ -114,6 +114,7 @@ def find_executable_batch_size(function: callable = None, starting_batch_size: i
             )
         while True:
             if batch_size == 0:
+                #Set OOM resume flag here
                 raise RuntimeError("No executable batch size found, reached zero.")
             try:
                 return function(batch_size, grad_size, prof, *args, **kwargs)

@@ -1,6 +1,6 @@
 accelerate~=0.18.0
-bitsandbytes==0.35.4
-dadaptation~=1.5.0
+bitsandbytes==0.38.1
+dadaptation~=2.0.0
 diffusers~=0.15.1
 discord-webhook~=1.1.0
 fastapi~=0.94.1

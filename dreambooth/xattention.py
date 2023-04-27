@@ -43,7 +43,7 @@ def get_scheduler(
     if num_warmup_steps is None:
         raise ValueError(f"{name} requires `num_warmup_steps`, please provide that argument.")
 
-    if name == SchedulerType.CONSTANT_WITH_WARMUP:
+    if name == SchedulerType.CONSTANT_WITH_WARMUP or name == SchedulerType.DADAPT_WITH_WARMUP:
         return schedule_func(optimizer, num_warmup_steps=num_warmup_steps)
 
     # All other schedulers require `num_training_steps`

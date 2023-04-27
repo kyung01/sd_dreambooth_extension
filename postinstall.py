@@ -115,16 +115,7 @@ def check_bitsandbytes():
     """
     if os.name == "nt":
         try:
-            bnb_src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bitsandbytes_windows")
-            bnb_dest = os.path.join(sysconfig.get_paths()["purelib"], "bitsandbytes")
-            filecmp.clear_cache()
-            for file in os.listdir(bnb_src):
-                src_file = os.path.join(bnb_src, file)
-                if file == "main.py" or file == "paths.py":
-                    dest = os.path.join(bnb_dest, "cuda_setup")
-                else:
-                    dest = bnb_dest
-                shutil.copy2(src_file, dest)
+            pip_install("--force-reinstall", "https://github.com/jllllll/bitsandbytes-windows-webui/raw/main/bitsandbytes-0.38.1-py3-none-any.whl")
         except:
             pass
 
@@ -147,9 +138,9 @@ def check_versions():
         Dependency(module="torch", version="1.13.1" if is_mac else "1.13.1+cu116"),
         Dependency(module="torchvision", version="0.14.1" if is_mac else "0.14.1+cu116"),
         Dependency(module="accelerate", version="0.17.1"),
-        Dependency(module="diffusers", version="0.14.0"),
+        Dependency(module="diffusers", version="0.15.0"),
         Dependency(module="transformers", version="4.25.1"),
-        Dependency(module="bitsandbytes",  version="0.35.4", version_comparison="exact"),
+        Dependency(module="bitsandbytes",  version="0.38.1", version_comparison="exact"),
     ]
 
     launch_errors = []
