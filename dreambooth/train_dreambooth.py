@@ -103,7 +103,7 @@ except:
 
 
 def dadapt(optimizer):
-    if optimizer == "AdamW Dadaptation" or optimizer == "Adan Dadaptation":
+    if optimizer == "AdamW Dadaptation" or optimizer == "Adan Dadaptation" or optimizer == "AdanIP Dadaptation":
         return True
     else:
         return False
@@ -440,7 +440,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             params_to_optimize = unet.parameters()
 
         optimizer = get_optimizer(args, params_to_optimize)
-        if len(optimizer.param_groups) > 1:
+        if len(optimizer.param_groups) == 2:
             try:
                 optimizer.param_groups[1]["weight_decay"] = args.tenc_weight_decay
                 optimizer.param_groups[1]["grad_clip_norm"] = args.tenc_grad_clip_norm
@@ -675,15 +675,6 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                 global_epoch = first_epoch
             except Exception as lex:
                 logger.warning(f"Exception loading checkpoint: {lex}")
-
-        # if shared.in_progress:
-        #    logger.debug("  ***** OOM detected. Resuming from last step *****")
-        #    max_train_steps = max_train_steps - shared.in_progress_step
-        #    max_train_epochs = max_train_epochs - shared.in_progress_epoch
-        #    session_epoch = shared.in_progress_epoch
-        #    text_encoder_epochs = (shared.in_progress_epoch/max_train_epochs)*text_encoder_epochs
-        # else:
-        #    shared.in_progress = True
 
         logger.debug("  ***** Running training *****")
         if shared.force_cpu:
@@ -1342,54 +1333,76 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                 dlr_unet, dlr_tenc = None, None
                 if dadapt(args.optimizer):
-                    dlr_unet = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
-                    if len(optimizer.param_groups) > 1:
-                        try:
-                            dlr_tenc = optimizer.param_groups[1]["d"] * optimizer.param_groups[1]["lr"]
-                        except:
-                            logger.warning("Exception setting tenc weight decay")
-                            traceback.print_exc()
+                    if args.use_lora and len(optimizer.param_groups) == 1 and args.stop_text_encoder > 0:
+                        logger.warning(f"TENC only is not supported for Lora. Setting Unet LR to 0 will do the same thing but will not use less memory")
+                        status.interupted = True
+                        if status_handler:
+                            status_handler.end("TENC only is not supported for Lora. Ending training")
+                        break
+                    else:
+                        dlr_unet = dlr_tenc = None
+                        if len(optimizer.param_groups) == 2 and args.stop_text_encoder > 0:
+                            try:
+                                dlr_unet = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
+                                dlr_tenc = optimizer.param_groups[1]["d"] * optimizer.param_groups[1]["lr"]
+                            except:
+                                logger.warning(f"Exception setting dlr for unet and tenc")
+                        else:
+                            for group in optimizer.param_groups:
+                                if group["d"] is not None:
+                                    try:
+                                        dlr = group["d"] * group["lr"]
+                                        if args.stop_text_encoder > 0 and group == optimizer.param_groups[0]:
+                                            dlr_tenc = dlr
+                                        elif args.stop_text_encoder > 0 and group == optimizer.param_groups[1]:
+                                            dlr_unet = dlr
+                                    except:
+                                        logger.warning(f"Exception setting {'tenc' if group == optimizer.param_groups[1] else 'unet'} dlr")
+                                        traceback.print_exc()
 
                 loss_step = loss.detach().item()
                 loss_total += loss_step
 
-                if args.split_loss:
-                    if dadapt(args.optimizer):
-                        logs = {
-                            "lr": float(dlr_unet),
-                            # "dlr_tenc": float(dlr_tenc),
-                            "loss": float(loss_step),
-                            "inst_loss": float(instance_loss.detach().item()),
-                            "prior_loss": float(prior_loss.detach().item()),
-                            "vram": float(cached),
-                        }
-                    else:
-                        logs = {
-                            "lr": float(last_lr),
-                            "loss": float(loss_step),
-                            "inst_loss": float(instance_loss.detach().item()),
-                            "prior_loss": float(prior_loss.detach().item()),
-                            "vram": float(cached),
-                        }
+                logs = {
+                    "lr": float(lr if args.split_loss else last_lr),
+                    "loss": float(loss_step),
+                    "inst_loss": float(instance_loss.detach().item()),
+                    "prior_loss": float(prior_loss.detach().item()),
+                    "vram": float(cached),
+                    "dlr_unet": float(dlr_unet if len(optimizer.param_groups) == 2: elif (len(optimizer.param_groups) == 1 and args.stop_text_encoder > 0) else None),
+                    "dlr_tenc": float(dlr_tenc if len(optimizer.param_groups) == 2: elif (len(optimizer.param_groups) == 1 and args.stop_text_encoder > 0) else None),
+                }
 
-                else:
-                    if dadapt(args.optimizer):
-                        logs = {
-                            "lr": float(dlr_unet),
-                            # "dlr_tenc": float(dlr_tenc),
-                            "loss": float(loss_step),
-                            "vram": float(cached),
-                        }
+                if dadapt(args.optimizer):
+                    if dbconfig.use_lora and len(optimizer.param_groups) == 1 and args.stop_text_encoder > 0:
+                        logger.warning("TENC only is not supported for Lora. Setting Unet LR to 0 will do the same thing but will not use less memory")
+                        status.cancelled = True
+                        if state_handler:
+                            state_handler.end("TENC only is not supported for Lora. Ending training")
+                        break
                     else:
-                        logs = {
-                            "lr": float(last_lr),
-                            "loss": float(loss_step),
-                            "vram": float(cached),
-                        }
+                        if dlr_unet is not None:
+                            try:
+                                logs["dlr_unet"] = float(dlr_unet)
+                                logs["lr"] = float(dlr_unet) if args.split_loss else float(dlr_unet)
+                            except:
+                                logger.warning("Exception setting unet dlr")
+                                traceback.print_exc()
 
-                if dlr_tenc:
+                        if dlr_tenc is not None and (args.split_loss or dlr_unet is None):
+                            try:
+                                logs["lr"] = float(dlr_tenc)
+                                logs["dlr_tenc"] = float(dlr_tenc)
+                            except:
+                                logger.warning("Exception setting tenc dlr")
+                                traceback.print_exc()         
+
+                if not args.split_loss and dadapt(args.optimizer) and len(optimizer.param_groups) > 1:
+                    logger.log(optimizer.state_dict().keys())
+
+                if dadapt(args.optimizer) and dlr_unet is not None:
                     status.textinfo2 = (
-                        f"Loss: {'%.2f' % loss_step}, UNET DLR: {'{:.2E}'.format(Decimal(dlr_unet))}, TENC DLR: {'{:.2E}'.format(Decimal(dlr_tenc))}, "
+                        f"Loss: {'%.2f' % loss_step}, DLR: {'{:.2E}'.format(Decimal(dlr_unet))},"
                         f"VRAM: {allocated}/{cached} GB"
                     )
                 else:
@@ -1422,9 +1435,6 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                 # Log completion message
                 if training_complete or status.interrupted:
-                    shared.in_progress = False
-                    shared.in_progress_step = 0
-                    shared.in_progress_epoch = 0
                     logger.debug("  Training complete (step check).")
                     if status.interrupted:
                         state = "canceled"
@@ -1479,9 +1489,6 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                         if status.interrupted:
                             training_complete = True
                             logger.debug("Training complete, interrupted.")
-                            shared.in_progress = False
-                            shared.in_progress_step = 0
-                            shared.in_progress_epoch = 0
                             if status_handler:
                                 status_handler.end("Training interrrupted.")
                             break

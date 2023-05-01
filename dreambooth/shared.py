@@ -165,6 +165,15 @@ class DreamState:
     active = False
     new_ui = False
     oom = False
+    optimizer = None
+    scheduler = None
+    model_state_max = 3
+    model_dir = None
+    model_params_path = None
+    previous_model_state = False
+    resume_model_state = True
+    verbose = False
+    
 
     def interrupt(self):
         if self.status_handler:
@@ -186,6 +195,85 @@ class DreamState:
     def save_model(self):
         self.do_save_model = True
 
+    def save_model_state(self):
+        if self.optimizer is None or self.scheduler is None or self.model_dir is None:
+            print("Error: Unable to save model state. Required variables are not set.")
+            return
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        optimizer_path = os.path.join(self.model_dir, f'optimizer_{timestamp}.pth.tar')
+        scheduler_path = os.path.join(self.model_dir, f'scheduler_{timestamp}.pth.tar')
+
+        optimizer_state_dict = self.optimizer.state_dict()
+        self.save_state_dict(optimizer_state_dict, optimizer_path)
+
+        if self.verbose:
+            print(f"Optimizer state saved to file: {optimizer_path}")
+
+        scheduler_state_dict = self.scheduler.state_dict()
+        self.save_state_dict(scheduler_state_dict, scheduler_path)
+
+        if self.verbose:
+            print(f"Scheduler state saved to file: {scheduler_path}")
+
+        self.save_model_params()
+
+        if self.verbose:
+            print(f"Model state saved: optimizer={optimizer_path}, scheduler={scheduler_path} in directory: {self.model_dir}")
+
+        # Delete old model states if the number of saved states exceeds the max
+        model_state_files = [f for f in os.listdir(self.model_dir) if f.startswith('optimizer_') or f.startswith('scheduler_')]
+        if len(model_state_files) > model_state_max:
+            model_state_files.sort()
+            for i in range(len(model_state_files) - model_state_max):
+                os.remove(os.path.join(self.model_dir, model_state_files[i]))
+
+    def save_state_dict(self, state_dict, path):
+        torch.save(state_dict, path)
+        if self.verbose:
+            print("State dictionary saved to file: ", path)
+
+    def get_optimizer_params(self):
+        if self.optimizer:
+            return self.optimizer.param_groups
+        else:
+            return None
+
+    def get_scheduler_params(self):
+        if self.scheduler:
+            return self.scheduler.state_dict()
+        else:
+            return None
+
+    def load_model_state(self, utc_timestamp=None):
+        if self.model_dir is None:
+            print("Error: Unable to load model state. Model directory is not set.")
+            return
+
+        if not self.resume_model_state:
+            # Reset optimizer and scheduler to None
+            self.optimizer = None
+            self.scheduler = None
+
+            if self.verbose:
+                print("Model state not loaded. Resuming with optimizer and scheduler set to None.")
+            return
+
+        if utc_timestamp is None:
+            model_state_files = [f for f in os.listdir(self.model_dir) if f.startswith('optimizer_') or f.startswith('scheduler_')]
+            if model_state_files:
+                print(f"No optimizer or scheduler state files found in directory: {self.model_dir}")
+                return
+
+            model_state_files.sort()
+            latest_model_state_file = model_state_files[-1]
+        else:
+            latest_model_state_file = None
+            model_state_files = [f for f in os.listdir(self.model_dir) if f.startswith('optimizer_') or f.startswith('scheduler_')]
+            for model_state_file in model_state_files:
+                if utc_timestamp in model_state_file:
+                    latest
+
     def dict(self):
         obj = {
             "do_save_model": self.do_save_model,
@@ -199,9 +287,25 @@ class DreamState:
             "last_status": self.textinfo,
             "sample_prompts": self.sample_prompts,
             "active": self.active,
-            "in_progress": self.in_progress,
-            "in_progress_epoch": self.in_progress_epoch,
-            "in_progress_step": self.in_progress_step,
+            "oom": self.oom,
+            "resume_model_state": self.resume_model_state,
+            "model_state_max": self.model_state_max,
+            "optimizer": self.optimizer,
+            "scheduler": self.scheduler,
+            "model_params_path": self.model_params_path,
+            "model_dir": self.model_dir,
+            "previous_model_state": self.previous_model_state,,
+            
+    scheduler = None
+    model_state_max = 3
+    model_dir = None
+    model_params_path = None
+    previous_model_state = False
+    resume_model_state = True
+    verbose = False
+            
+            
+            
         }
 
         return obj
@@ -391,6 +495,10 @@ def load_vars(root_path = None):
 
     if state is None:
         state = status
+        if optimizer_state is None:
+            load_optimizer_state(optimizer_state_path)
+        if scheduler_state is None:
+            load_scheduler_state(scheduler_state_path)
 
 status_handler = None
 script_path = ""

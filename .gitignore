@@ -1,6 +1,6 @@
 #IDE
 .idea
-.vscode/settings.json
+.vscode/**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -61,3 +61,4 @@ docs/_build/
 # PyBuilder
 target/
 .vscode/launch.json
+.vscode/tasks.json
