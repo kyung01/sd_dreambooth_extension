@@ -1,9 +1,16 @@
 let dreamSelect;
 let dreamConfig;
 let showAdvanced;
+let dreamProgress;
+let dreamGallery;
 let lastConcept = -1;
 let conceptsList = [];
 let dbListenersLoaded = false;
+let dbModelCol;
+let dbStatusCol;
+
+// Define the Bootstrap "md" breakpoint as a constant
+const mdBreakpoint = 990;
 
 $(".hide").hide();
 
@@ -12,6 +19,7 @@ const dbModule = new Module("Dreambooth", "moduleDreambooth", "moon", false, 2, 
 
 function initDreambooth() {
     console.log("Init dreambooth");
+
     let selects = $(".modelSelect").modelSelect();
     for (let i = 0; i < selects.length; i++) {
         let elem = selects[i];
@@ -20,20 +28,43 @@ function initDreambooth() {
         }
     }
 
-    inferProgress = new ProgressGroup(document.getElementById("dreamProgress"), {
+    let prog_opts = {
         "primary_status": "Status 1", // Status 1 text
         "secondary_status": "Status 2", // Status 2...
         "bar1_progress": 0, // Progressbar 1 position
-        "bar2_progress": 0 // etc
-    });
+        "bar2_progress": 0, // etc
+        "id": "dreamProgress" // ID of the progress group
+    }
 
-    // Gallery creation. Options can also be passed to .update()
-    gallery = new InlineGallery(document.getElementById('dreamGallery'), {
+    let gallery_opts = {
         "thumbnail": true,
         "closeable": false,
         "show_maximize": true,
-        "start_open": true
+        "start_open": true,
+        "id": "dreamProgress"
+    }
+
+    window.addEventListener('resize', handleResize);
+
+    // Call the function once on page load to ensure the correct container is shown
+    handleResize();
+    let pg = document.getElementById("dreamProgress");
+    console.log("Progress: ", pg);
+    dreamProgress = new ProgressGroup(document.getElementById("dreamProgress"), prog_opts);
+    dreamProgress.setOnCancel(function() {
+        $(".dbTrainBtn").addClass("hide");
+        $(".dbSettingBtn").removeClass("hide");
     });
+
+    dreamProgress.setOnComplete(function() {
+        $(".dbTrainBtn").addClass("hide");
+        $(".dbSettingBtn").removeClass("hide");
+    });
+
+    // Gallery creation. Options can also be passed to .update()
+    dreamGallery = new InlineGallery(document.getElementById('dreamGallery'), gallery_opts);
+
+    console.log("Gallery and progress: ", dreamProgress, dreamGallery);
 
     $(".db-slider").BootstrapSlider();
 
@@ -56,7 +87,46 @@ function initDreambooth() {
 }
 
 
+function handleResize() {
+    // Get the current window width
+    const windowWidth = window.innerWidth;
+    dbModelCol = document.getElementById("dbModelCol");
+    dbStatusCol = document.getElementById("dbStatusCol");
+
+    let statusCard = document.getElementById("dreamStatus");
+    // If the window is less than the "md" breakpoint
+    if (windowWidth <= mdBreakpoint) {
+        // Check if statusCard is not already a child of dbModelCol
+        if (dbModelCol.contains(statusCard) === false) {
+            // Append statusCard to dbModelCol
+            dbModelCol.prepend(statusCard);
+            //dbModelCol.appendChild(statusCard);
+        }
+        // Hide dbStatusCol
+        dbStatusCol.style.display = "none";
+    } else {
+        // Check if statusCard is not already a child of dbStatusCol
+        if (dbStatusCol.contains(statusCard) === false) {
+            // Append statusCard to dbStatusCol
+            dbStatusCol.appendChild(statusCard);
+        }
+        // Show dbStatusCol
+        dbStatusCol.style.display = "block";
+    }
+}
+
 function loadDbListeners() {
+    $("#db_use_shared_src").click(function () {
+        let checked = $(this).is(":checked");
+        if (checked) {
+            console.log("CHECKED");
+            $("#shared_row").show();
+        } else {
+            console.log("NOT CHECKED");
+            $("#shared_row").hide();
+        }
+    });
+
     $("#db_create_model").click(function () {
         let data = {};
         $(".newModelParam").each(function (index, elem) {
@@ -73,10 +143,9 @@ function loadDbListeners() {
             }
             data[key] = val;
         });
-        sendMessage("create_dreambooth", data, true).then(() => {
+        sendMessage("create_dreambooth", data, false, "dreamProgress").then(() => {
             dreamSelect.refresh();
         });
-
     });
 
     $("#db_load_settings").click(function () {
@@ -103,9 +172,16 @@ function loadDbListeners() {
     $("#db_train").click(function () {
         let data = getSettings();
         console.log("Settings: ", data);
-        sendMessage("train_dreambooth", data, true).then((result) => {
+        sendMessage("train_dreambooth", data, true, "dreamProgress").then((result) => {
+            $(".dbSettingBtn").addClass("hide");
+            $(".dbTrainBtn").removeClass("hide").show();
             console.log("Res: ", result);
         });
+    });
+
+    $("#db_cancel").click(function () {
+        $(".dbSettingBtn").removeClass("hide");
+        $(".dbTrainBtn").addClass("hide");
     });
 
     $("#db_load_params").click(function () {
@@ -150,7 +226,7 @@ function loadDbListeners() {
 
     $("#db_save_config").click(function () {
         let selected = dreamSelect.getModel();
-        console.log("Load model settings click: ", selected);
+        console.log("Save model settings click: ", selected);
         if (selected === undefined) {
             alert("Please select a model first!");
         } else {
@@ -181,6 +257,8 @@ function loadDbListeners() {
     });
 
     keyListener.register("ctrl+Enter", "#dreamSettings", startDreambooth);
+
+    dbListenersLoaded = true;
 }
 
 function loadConcepts(concepts) {
@@ -237,15 +315,24 @@ function addConcept(concept = false) {
     }
 
     if (!concept) {
-        concept = [{
-            "class_prompt": "Class prompt",
-            "class_token": "",
-            "instance_prompt": "",
-            "instance_token": "",
+        concept = {
             "class_data_dir": "",
+            "class_guidance_scale": 7.5,
+            "class_infer_steps": 20,
+            "class_negative_prompt": "blurry, deformed, bad",
+            "class_prompt": "[filewords]",
+            "class_token": "",
             "instance_data_dir": "",
-            "n_save_sample": 4,
-        }];
+            "instance_prompt": "[filewords]",
+            "instance_token": "",
+            "n_save_sample": 0,
+            "num_class_images_per": 0,
+            "sample_seed": -1,
+            "save_guidance_scale": 7.5,
+            "save_infer_steps": 20,
+            "save_sample_negative_prompt": "blurry, deformed, bad",
+            "save_sample_prompt": "[filewords]"
+        };
     }
 
     conceptsList.push(concept);
@@ -260,15 +347,14 @@ function addConcept(concept = false) {
         "instance_token",
         "class_token",
         "num_class_images_per",
-        "class_negative_prompt",
-        "class_guidance_scale",
-        "class_infer_steps",
-        "save_sample_negative_prompt",
         "n_save_sample",
-        "sample_seed",
+        "class_negative_prompt",
+        "save_sample_negative_prompt",
+        "class_guidance_scale",
         "save_guidance_scale",
-        "save_infer_steps"
-
+        "class_infer_steps",
+        "save_infer_steps",
+        "sample_seed"
     ];
 
     let i = conceptsContainer.children().length + 1;
@@ -287,13 +373,15 @@ function addConcept(concept = false) {
                 </div>
               </div>`);
 
-    formAccordion.click(function () {
+    formAccordion.click(function (event) {
+        event.preventDefault();
         let idx = $(this).data("index");
         console.log("Clicked: ", idx);
         lastConcept = idx;
     });
 
-    formAccordion.blur(function () {
+    formAccordion.blur(function (event) {
+        event.preventDefault();
         console.log("The element has lost focus.");
     });
 
@@ -315,6 +403,7 @@ function addConcept(concept = false) {
                     </div>
                 `);
             formElements.append(fileBrowser);
+            console.log("Creating file browser: ", concept, key);
             new FileBrowser(document.getElementById(`${inputId}`), {
                 "dropdown": true,
                 "showInfo": false,
@@ -403,17 +492,24 @@ function getSettings() {
     // Just create one concept if advanced is disabled
     let concepts_list = [];
 
+    let inputElements = $('[id^="concept_"]');
 
-    let inputElements = document.querySelectorAll('input[id^="concept_"]');
     let values = [];
-    inputElements.forEach((element) => {
+    inputElements.each((index, element) => {
+        console.log("Parsing concept input: ", element, element.value);
         let conceptIndex = element.id.split("-")[0].split("_")[1];
         let key = element.id.split("-")[1];
 
-        let value = element.value;
-        if (key.includes("data_dir")) {
-            value = $(element).FileBrowser.val();
+        let value = (element.dataset.hasOwnProperty("value") ? element.dataset.value : element.value);
+        if (value === "undefined") {
+            value = "";
         }
+        if (!isNaN(parseInt(value))) {
+            value = parseInt(value);
+        } else if (!isNaN(parseFloat(value))) {
+            value = parseFloat(value);
+        }
+
         let found = false;
         for (let i = 0; i < values.length; i++) {
             if (values[i]["conceptIndex"] === conceptIndex) {
@@ -425,26 +521,45 @@ function getSettings() {
         if (!found) {
             let newValue = {"conceptIndex": conceptIndex};
             newValue[key] = value;
+            console.log("Creating new value: ", newValue);
             values.push(newValue);
         }
     });
 
+
     let otherInputs = $(".dbInput");
     otherInputs.each(function () {
         let element = $(this);
-        let id = element.data("elem_id") || element.id;
+        let id = element.data("elem_id") || element.attr("id");
         let slider = element.data("BootstrapSlider");
         let file = element.data("fileBrowser");
+        let value;
+
         if (slider) {
-            settings[id] = parseInt(slider.value);
+            console.log("SLIDER", slider);
+            value = parseInt(slider.value);
         } else if (file) {
+            console.log("Filebrowser", file);
             let browser = element.FileBrowser();
-            settings[id] = browser.value;
+            value = browser.value;
+        } else if (element.is(":checkbox")) {
+            value = element.is(":checked");
+        } else if (element.is(":radio")) {
+            if (element.is(":checked")) {
+                value = element.val();
+            }
+        } else if (element.is("select")) {
+            value = element.val();
+        } else if (element.is("input[type='number']")) {
+            value = parseFloat(element.val());
         } else {
-            if (id === undefined) id = element[0].id;
-            settings[id] = element[0].value;
+            value = element.val();
         }
+
+        console.log("Input", id, value);
+        settings[id] = value;
     });
+
 
     let highestConceptIndex = -1;
     const concepts = {};

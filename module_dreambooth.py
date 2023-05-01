@@ -1,11 +1,15 @@
 import asyncio
+import gc
 import json
 import logging
 import os
 import shutil
+import traceback
 
 from concurrent.futures import ThreadPoolExecutor
 from typing import Union, Dict
+
+import torch
 
 from core.handlers.models import ModelHandler
 from core.handlers.status import StatusHandler
@@ -48,39 +52,64 @@ class DreamboothModule(BaseModule):
 
 async def _start_training(request):
     user = request["user"] if "user" in request else None
+    target = request["target"] if "target" in request else None
     config = await _set_model_config(request, True)
-    asyncio.create_task(_train_dreambooth(config, user))
+    asyncio.create_task(_train_dreambooth(config, user, target))
     return {"status": "Training started."}
 
 
-async def _train_dreambooth(config: DreamboothConfig, user: str = None):
+async def _train_dreambooth(config: DreamboothConfig, user: str = None, target: str = None):
     logger.debug(f"Updated config: {config.__dict__}")
+    mh = ModelHandler(user_name=user)
+    mh.to_cpu()
     shared.db_model_config = config
-    loop = asyncio.get_event_loop()
-    with ThreadPoolExecutor() as pool:
-        await loop.run_in_executor(pool, lambda: main(user=user))
+    try:
+        torch.cuda.empty_cache()
+        gc.collect()
+    except:
+        pass
+
+    result = {"message": "Training complete."}
+    try:
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as pool:
+            await loop.run_in_executor(pool, lambda: main(user=user))
+    except Exception as e:
+        logger.error(f"Error in training: {e}")
+        traceback.print_exc()
+        result = {"message": f"Error in training: {e}"}
+
+    try:
+        gc.collect()
+        torch.cuda.empty_cache()
+    except:
+        pass
+    mh.to_gpu()
+    return result
 
 
 async def _create_model(data):
     mh = ModelHandler(user_name=data["user"] if "user" in data else None)
     sh = StatusHandler(user_name=data["user"] if "user" in data else None)
-    msg_id = data["id"]
     logger.debug(f"Full message: {data}")
     data = data["data"] if "data" in data else None
     logger.debug(f"Create model called: {data}")
     model_name = data["new_model_name"] if "new_model_name" in data else None
-    src = data["new_model_src"]["path"]
-    shared_src = data["new_model_shared_src"]["path"] if "new_model_shared_src" in data else None
+    src_hash = data["new_model_src"]
+    src_model = await mh.find_model("diffusers", src_hash)
+    src = src_model.path if src_model else None
+    shared_src = data["new_model_shared_src"] if "new_model_shared_src" in data else None
     from_hub = data["create_from_hub"] if "create_from_hub" in data else False
     logger.debug(f"SRC - {src} and {from_hub}")
+    if not src:
+        logger.debug("Unable to find source model.")
+        return {"status": "Unable to find source model.."}
+
     if src and not from_hub:
-        sh.start(1, "Copying source weights.")
-        copy_model(model_name, src, data["512_model"], mh)
-        sh.step()
-        sh.end("Model created.")
+        copy_model(model_name, src, data["512_model"], mh, sh)
+        sh.end("Model copied.")
     else:
-        loop = asyncio.get_running_loop()
-        loop.create_task(extract_checkpoint(
+        extract_checkpoint(
             model_name,
             src,
             shared_src,
@@ -90,12 +119,11 @@ async def _create_model(data):
             data["new_model_extract_ema"],
             data["train_unfrozen"],
             data["512_model"]
-        ))
-    return {"name": "create_model", "message": "Creating model.", "id": msg_id}
+        )
+    return {"status": "Creating model."}
 
 
-def copy_model(model_name: str, src: str, is_512: bool, mh: ModelHandler):
-    logger.debug("Copying model!")
+def copy_model(model_name: str, src: str, is_512: bool, mh: ModelHandler, sh: StatusHandler):
     models_path = mh.models_path
     logger.debug(f"Models paths: {models_path}")
     model_dir = models_path[0]
@@ -104,11 +132,43 @@ def copy_model(model_name: str, src: str, is_512: bool, mh: ModelHandler):
     if os.path.exists(dest_dir):
         shutil.rmtree(dest_dir, True)
     if not os.path.exists(dest_dir):
-        shutil.copytree(src, dest_dir)
+        logger.debug(f"Copying model from {src} to {dest_dir}")
+        copy_directory(src, dest_dir, sh)
         cfg = DreamboothConfig(model_name=model_name, src=src, resolution=is_512, models_path=dreambooth_models_path)
         cfg.save()
     else:
         logger.debug(f"Destination directory '{dest_dir}' already exists, skipping copy.")
+    logger.debug("Model copied.")
+
+
+def copy_directory(src_dir, dest_dir, sh: StatusHandler):
+    total_size = get_directory_size(src_dir)
+    sh.start(100, "Copying source weights.")
+    copied_pct = 0
+    copied_size = 0
+    for root, dirs, files in os.walk(src_dir):
+        for file in files:
+            sh.update(items={"status_2": f"Copying {file}"})
+            src_path = os.path.join(root, file)
+            dest_path = os.path.join(dest_dir, os.path.relpath(src_path, src_dir))
+            dest_dirname = os.path.dirname(dest_path)
+            if not os.path.exists(dest_dirname):
+                os.makedirs(dest_dirname)
+            shutil.copy2(src_path, dest_path)
+            copied_size += os.path.getsize(src_path)
+            current_pct = int(copied_size / total_size * 100)
+            if current_pct > copied_pct:
+                sh.update(items={"progress_1_current": current_pct})
+                copied_pct = current_pct
+    sh.end("Source weights copied.")
+
+
+def get_directory_size(dir_path):
+    total_size = 0
+    for root, dirs, files in os.walk(dir_path):
+        for file in files:
+            total_size += os.path.getsize(os.path.join(root, file))
+    return total_size
 
 
 async def _get_layout(data):
