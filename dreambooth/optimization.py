@@ -565,9 +565,16 @@ class UniversalScheduler:
     def get_lr(self) -> float:
         return self.scheduler.get_lr()
 
+def dadaptInf(infEnabled: True)
+    if infEnabled:
+        growth_rate = 'inf'
+    else
+        growth_rate = 1.02
+    return growth_rate
+
 
 #Temp conditional for dadapt optimizer console logging
-def log_dadapt(disable: bool = True):
+def log_dadapt(disable: bool = False):
     if disable:
          return 0
     else:
@@ -606,6 +613,7 @@ def get_optimizer(args, params_to_optimize):
                 lr=args.learning_rate,
                 weight_decay=args.weight_decay,
                 decouple=True,
+                growth_rate=dadaptInf(False),
                 log_every=log_dadapt(True)
             )
 
@@ -615,6 +623,7 @@ def get_optimizer(args, params_to_optimize):
                 params_to_optimize,
                 lr=args.learning_rate,
                 weight_decay=args.weight_decay,
+                growth_rate=dadaptInf(False),
                 log_every=log_dadapt(True)
             )
 
@@ -624,7 +633,8 @@ def get_optimizer(args, params_to_optimize):
                 params_to_optimize,
                 lr=args.learning_rate,
                 weight_decay=args.weight_decay,
-                log_every=log_dadapt(True),
+                growth_rate=dadaptInf(False),
+                log_every=log_dadapt(True)
             )
 
 

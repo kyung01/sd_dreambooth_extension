@@ -1,5 +1,5 @@
 # One wrapper we're going to use to not depend so much on the main app.
-import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -44,9 +44,6 @@ def load_auto_settings():
         config = ws.cmd_opts.config
         device = ws.device
         sd_model = ws.sd_model
-        in_progress = False
-        in_progress_epoch = 0
-        in_progress_step = 0
 
         def set_model(new_model):
             global sd_model
@@ -145,6 +142,7 @@ class DreamState:
     interrupted_after_save = False
     interrupted_after_epoch = False
     do_save_model = False
+    do_save_state = False
     do_save_samples = False
     skipped = False
     job = ""
@@ -195,8 +193,8 @@ class DreamState:
     def save_model(self):
         self.do_save_model = True
 
-    def save_model_state(self):
-        if self.optimizer is None or self.scheduler is None or self.model_dir is None:
+    def save_model_state(self, optimizer: torch.optim, scheduler: torch.optim.lr_scheduler, model_dir: str):
+        if optimizer is None or scheduler is None or model_dir is None:
             print("Error: Unable to save model state. Required variables are not set.")
             return
 
@@ -223,9 +221,9 @@ class DreamState:
 
         # Delete old model states if the number of saved states exceeds the max
         model_state_files = [f for f in os.listdir(self.model_dir) if f.startswith('optimizer_') or f.startswith('scheduler_')]
-        if len(model_state_files) > model_state_max:
+        if len(model_state_files) > self.model_state_max:
             model_state_files.sort()
-            for i in range(len(model_state_files) - model_state_max):
+            for i in range(len(model_state_files) - self.model_state_max):
                 os.remove(os.path.join(self.model_dir, model_state_files[i]))
 
     def save_state_dict(self, state_dict, path):
@@ -245,38 +243,82 @@ class DreamState:
         else:
             return None
 
-    def load_model_state(self, utc_timestamp=None):
+    def load_model_state(self, utc_timestamp=None, device=None):
         if self.model_dir is None:
             print("Error: Unable to load model state. Model directory is not set.")
             return
 
         if not self.resume_model_state:
-            # Reset optimizer and scheduler to None
-            self.optimizer = None
-            self.scheduler = None
+            # Create a new optimizer and scheduler using the config values
+            # First get the optimizer and scheduler names from the config
+            optimizer_name = self.config.get('optimizer', {}).get('name', 'AdamW')
+            scheduler_name = self.config.get('scheduler', {}).get('name', 'ConstantLR')
 
-            if self.verbose:
-                print("Model state not loaded. Resuming with optimizer and scheduler set to None.")
-            return
+            # Load the optimizer and scheduler classes dynamically
+            optimizer_class = getattr(torch.optim, optimizer_name)
+            scheduler_class = getattr(torch.optim.lr_scheduler, scheduler_name)
+
+            # Initialize the optimizer and scheduler with the config values
+            optimizer_params = self.config.get('optimizer', {}).get('params', {})
+            scheduler_params = self.config.get('scheduler', {}).get('params', {})
+            self.optimizer = optimizer_class(self.model.parameters(), **optimizer_params)
+            self.scheduler = scheduler_class(self.optimizer, **scheduler_params)
 
         if utc_timestamp is None:
             model_state_files = [f for f in os.listdir(self.model_dir) if f.startswith('optimizer_') or f.startswith('scheduler_')]
-            if model_state_files:
+            if not model_state_files:
                 print(f"No optimizer or scheduler state files found in directory: {self.model_dir}")
                 return
-
+            
             model_state_files.sort()
             latest_model_state_file = model_state_files[-1]
+
         else:
             latest_model_state_file = None
             model_state_files = [f for f in os.listdir(self.model_dir) if f.startswith('optimizer_') or f.startswith('scheduler_')]
-            for model_state_file in model_state_files:
-                if utc_timestamp in model_state_file:
-                    latest
+        for model_state_file in model_state_files:
+            if utc_timestamp in model_state_file:
+                latest_model_state_file = model_state_file
+                break
+
+        if latest_model_state_file is None:
+            print(f"No optimizer or scheduler state files found in directory: {self.model_dir} with timestamp {utc_timestamp}.")
+            return
+
+        optimizer_path = os.path.join(self.model_dir, latest_model_state_file)
+        scheduler_path = optimizer_path.replace('optimizer_', 'scheduler_')
+
+        optimizer_state_dict = self.load_state_dict(optimizer_path, device)
+        if optimizer_state_dict is None:
+            print(f"Error: Unable to load optimizer state from file: {optimizer_path}")
+            return
+
+        self.optimizer.load_state_dict(optimizer_state_dict)
+
+        if self.verbose:
+            print(f"Optimizer state loaded from file: {optimizer_path}")
+
+        scheduler_state_dict = self.load_state_dict(scheduler_path, device)
+        if scheduler_state_dict is None:
+            print(f"Error: Unable to load scheduler state from file: {scheduler_path}")
+            return
+
+        self.scheduler.load_state_dict(scheduler_state_dict)
+
+        if self.verbose:
+            print(f"Scheduler state loaded from file: {scheduler_path}")
+
+        self.load_model_params()
+
+        if self.verbose:
+            print(f"Model state loaded: optimizer={optimizer_path}, `scheduler={scheduler_path} from directory: {self.model_dir}")
+
+
 
     def dict(self):
         obj = {
             "do_save_model": self.do_save_model,
+            "do_save_state": self.do_save_state,
             "do_save_samples": self.do_save_samples,
             "interrupted": self.interrupted,
             "job": self.job,
@@ -294,18 +336,7 @@ class DreamState:
             "scheduler": self.scheduler,
             "model_params_path": self.model_params_path,
             "model_dir": self.model_dir,
-            "previous_model_state": self.previous_model_state,,
-            
-    scheduler = None
-    model_state_max = 3
-    model_dir = None
-    model_params_path = None
-    previous_model_state = False
-    resume_model_state = True
-    verbose = False
-            
-            
-            
+            "previous_model_state": self.previous_model_state,
         }
 
         return obj
@@ -492,14 +523,7 @@ def load_vars(root_path = None):
             torch.narrow = lambda *args, **kwargs: (orig_narrow(*args, **kwargs).clone())
 
     status = DreamState()
-
-    if state is None:
-        state = status
-        if optimizer_state is None:
-            load_optimizer_state(optimizer_state_path)
-        if scheduler_state is None:
-            load_scheduler_state(scheduler_state_path)
-
+    
 status_handler = None
 script_path = ""
 models_path = ""

@@ -767,7 +767,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     or save_lora
                     or save_image
                     or save_model
-            ):
+                ):
                 save_weights(
                     save_image,
                     save_model,
@@ -775,6 +775,8 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     save_checkpoint,
                     save_lora,
                 )
+                #shared.save_model_state(shared.optimizer,shared.scheduler)
+                #shared.save_model_state()
 
             return save_model
 
@@ -1361,7 +1363,11 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                     except:
                                         logger.warning(f"Exception setting {'tenc' if group == optimizer.param_groups[1] else 'unet'} dlr")
                                         traceback.print_exc()
-
+                if dlr_unet:
+                    lr = dlr_unet
+                elif dlr_tenc:
+                    lr = dlr_tenc
+   
                 loss_step = loss.detach().item()
                 loss_total += loss_step
 
@@ -1371,16 +1377,16 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     "inst_loss": float(instance_loss.detach().item()),
                     "prior_loss": float(prior_loss.detach().item()),
                     "vram": float(cached),
-                    "dlr_unet": float(dlr_unet if len(optimizer.param_groups) == 2: elif (len(optimizer.param_groups) == 1 and args.stop_text_encoder > 0) else None),
-                    "dlr_tenc": float(dlr_tenc if len(optimizer.param_groups) == 2: elif (len(optimizer.param_groups) == 1 and args.stop_text_encoder > 0) else None),
+                    "dlr_unet": float(dlr_unet) if len(optimizer.param_groups) == 2 or (len(optimizer.param_groups) == 1 and args.stop_text_encoder > 0) else None,
+                    "dlr_tenc": float(dlr_tenc) if len(optimizer.param_groups) == 2 or (len(optimizer.param_groups) == 1 and args.stop_text_encoder > 0) else None,
                 }
 
                 if dadapt(args.optimizer):
-                    if dbconfig.use_lora and len(optimizer.param_groups) == 1 and args.stop_text_encoder > 0:
+                    if args.use_lora and len(optimizer.param_groups) == 1 and args.stop_text_encoder > 0:
                         logger.warning("TENC only is not supported for Lora. Setting Unet LR to 0 will do the same thing but will not use less memory")
                         status.cancelled = True
-                        if state_handler:
-                            state_handler.end("TENC only is not supported for Lora. Ending training")
+                        if shared.state_handler:
+                            shared.state_handler.end("TENC only is not supported for Lora. Ending training")
                         break
                     else:
                         if dlr_unet is not None:
@@ -1392,6 +1398,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                 traceback.print_exc()
 
                         if dlr_tenc is not None and (args.split_loss or dlr_unet is None):
+                            lr = dlr_tenc
                             try:
                                 logs["lr"] = float(dlr_tenc)
                                 logs["dlr_tenc"] = float(dlr_tenc)
