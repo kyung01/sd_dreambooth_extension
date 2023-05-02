@@ -27,7 +27,6 @@ from diffusers import (
 from diffusers.models.attention_processor import AttnProcessor2_0
 from diffusers.utils import logging as dl, is_xformers_available
 from packaging import version
-from tensorflow.python.framework.random_seed import set_seed as set_seed1
 from torch.cuda.profiler import profile
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
