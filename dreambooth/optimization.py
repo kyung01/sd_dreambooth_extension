@@ -565,10 +565,10 @@ class UniversalScheduler:
     def get_lr(self) -> float:
         return self.scheduler.get_lr()
 
-def dadaptInf(infEnabled: True)
+def dadaptInf(infEnabled: bool = True):
     if infEnabled:
         growth_rate = 'inf'
-    else
+    else:
         growth_rate = 1.02
     return growth_rate
 

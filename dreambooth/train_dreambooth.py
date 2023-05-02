@@ -1291,7 +1291,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                         if len(instance_chunks) and len(prior_chunks):
                             # Add the prior loss to the instance loss.
-                            loss = loss + (prior_loss * current_prior_loss_weight)
+                            loss = instance_loss + (prior_loss * current_prior_loss_weight)
                         elif len(instance_chunks):
                             loss = instance_loss
                         else:

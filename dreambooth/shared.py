@@ -132,8 +132,9 @@ def torch_gc():
 
 
 def format_time(seconds: float):
-    date = datetime.datetime.utcfromtimestamp(seconds)
-    return datetime.datetime.strftime(date, "%H:%M:%S")
+    date = datetime.utcfromtimestamp(seconds)
+    return datetime.strftime(date, "%H:%M:%S")
+
 
 
 class DreamState:
@@ -345,7 +346,7 @@ class DreamState:
         self.sampling_step = 0
         self.job_count = -1
         self.job_no = 0
-        self.job_timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        self.job_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         self.current_latent = None
         self.current_image = None
         self.current_image_sampling_step = 0
