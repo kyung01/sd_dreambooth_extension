@@ -172,6 +172,7 @@ class DreamState:
     previous_model_state = False
     resume_model_state = True
     verbose = False
+    db_model_config = None
     
 
     def interrupt(self):
@@ -246,22 +247,24 @@ class DreamState:
 
     def load_model_state(self, utc_timestamp=None, device=None):
         if self.model_dir is None:
-            print("Error: Unable to load model state. Model directory is not set.")
-            return
-
+            if self.db_model_config is not None:
+                self.model_dir = self.db_model_config.model_dir
+            else:
+                print("Error: Unable to load model state. Model directory is not set.")
+                return
         if not self.resume_model_state:
             # Create a new optimizer and scheduler using the config values
             # First get the optimizer and scheduler names from the config
-            optimizer_name = self.config.get('optimizer', {}).get('name', 'AdamW')
-            scheduler_name = self.config.get('scheduler', {}).get('name', 'ConstantLR')
+            optimizer_name = self.db_model_config.get('optimizer', {}).get('name', 'AdamW')
+            scheduler_name = self.db_model_config.get('scheduler', {}).get('name', 'ConstantLR')
 
             # Load the optimizer and scheduler classes dynamically
             optimizer_class = getattr(torch.optim, optimizer_name)
             scheduler_class = getattr(torch.optim.lr_scheduler, scheduler_name)
 
             # Initialize the optimizer and scheduler with the config values
-            optimizer_params = self.config.get('optimizer', {}).get('params', {})
-            scheduler_params = self.config.get('scheduler', {}).get('params', {})
+            optimizer_params = self.db_model_config.get('optimizer', {}).get('params', {})
+            scheduler_params = self.db_model_config.get('scheduler', {}).get('params', {})
             self.optimizer = optimizer_class(self.model.parameters(), **optimizer_params)
             self.scheduler = scheduler_class(self.optimizer, **scheduler_params)
 
@@ -545,9 +548,6 @@ ckptfix = False
 medvram = False
 lowvram = False
 debug = False
-in_progress = False
-in_progress_epoch = 0
-in_progress_step = 0
 profile_db = False
 sub_quad_q_chunk_size = 1024
 sub_quad_kv_chunk_size = None

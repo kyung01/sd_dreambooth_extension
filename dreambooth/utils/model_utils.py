@@ -12,6 +12,7 @@ from dreambooth import shared  # noqa
 from dreambooth.dataclasses.db_config import DreamboothConfig  # noqa
 from dreambooth.utils.utils import cleanup  # noqa
 
+db_config = None
 checkpoints_list = {}
 checkpoint_alisases = {}
 checkpoints_loaded = collections.OrderedDict()
@@ -246,15 +247,15 @@ def enable_safe_unpickle():
 
 
 def xformerify(obj):
-    try:
-        from diffusers.models.attention_processor import AttnProcessor2_0
-        print("Enabling SDP")
-        obj.set_attn_processor(AttnProcessor2_0())
-        return
-    except:
-        pass
-
-    if is_xformers_available():
+    if shared.db_model_config.attention is not "xformers":
+        try:
+            from diffusers.models.attention_processor import AttnProcessor2_0
+            print("Enabling SDP")
+            obj.set_attn_processor(AttnProcessor2_0())
+            return
+        except:
+            pass
+    else:
         try:
             print("Enabling xformers memory efficient attention for unet")
             obj.enable_xformers_memory_efficient_attention()
