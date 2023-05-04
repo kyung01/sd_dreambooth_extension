@@ -18,8 +18,6 @@ $(".hide").hide();
 const dbModule = new Module("Dreambooth", "moduleDreambooth", "moon", false, 2, initDreambooth);
 
 function initDreambooth() {
-    console.log("Init dreambooth");
-
     let selects = $(".modelSelect").modelSelect();
     for (let i = 0; i < selects.length; i++) {
         let elem = selects[i];
@@ -54,7 +52,6 @@ function initDreambooth() {
     // Call the function once on page load to ensure the correct container is shown
     handleResize();
     let pg = document.getElementById("dreamProgress");
-    console.log("Progress: ", pg);
     dreamProgress = new ProgressGroup(document.getElementById("dreamProgress"), prog_opts);
     dreamProgress.setOnCancel(function() {
         $(".dbTrainBtn").addClass("hide");
@@ -69,7 +66,6 @@ function initDreambooth() {
     // Gallery creation. Options can also be passed to .update()
     dreamGallery = new InlineGallery(document.getElementById('dreamGallery'), gallery_opts);
 
-    console.log("Gallery and progress: ", dreamProgress, dreamGallery);
 
     $(".db-slider").BootstrapSlider();
 
@@ -80,7 +76,6 @@ function initDreambooth() {
     registerSocketMethod("train_dreambooth", "train_dreambooth", dreamResponse);
 
     dreamConfig = dbModule.systemConfig;
-    console.log("Dream settings: ", dreamConfig);
     showAdvanced = dreamConfig["show_advanced"];
     if (showAdvanced) {
         $(".db-advanced").show();
@@ -124,10 +119,8 @@ function loadDbListeners() {
     $("#db_use_shared_src").click(function () {
         let checked = $(this).is(":checked");
         if (checked) {
-            console.log("CHECKED");
             $("#shared_row").show();
         } else {
-            console.log("NOT CHECKED");
             $("#shared_row").hide();
         }
     });
@@ -156,7 +149,6 @@ function loadDbListeners() {
 
     $("#db_load_settings").click(function () {
         let selected = dreamSelect.getModel();
-        console.log("Load model settings click: ", selected);
         if (selected === undefined) {
             alert("Please select a model first!");
         } else {
@@ -181,7 +173,6 @@ function loadDbListeners() {
         sendMessage("train_dreambooth", data, true, "dreamProgress").then((result) => {
             $(".dbSettingBtn").addClass("hide");
             $(".dbTrainBtn").removeClass("hide").show();
-            console.log("Res: ", result);
         });
     });
 
@@ -192,16 +183,13 @@ function loadDbListeners() {
 
     $("#db_load_params").click(function () {
         let selected = dreamSelect.getModel();
-        console.log("Load model settings click: ", selected);
         if (selected === undefined) {
             alert("Please select a model first!");
         } else {
             sendMessage("get_db_config", {model: selected}, true).then((result) => {
-                console.log("Params: ", result);
                 for (let key in result["config"]) {
                     if (key === "concepts_list") {
                         let concepts = result["config"][key];
-                        console.log("Concepts: ", concepts);
                         loadConcepts(concepts);
                         continue;
                     }
@@ -211,8 +199,6 @@ function loadDbListeners() {
                     }
                     let value = result["config"][key];
                     if (elem.length) {
-                        console.log("Checking: ", elem, key, value);
-
                         if (elem[0].classList.contains("db-slider")) {
                             let slider = $(elem[0]).data("BootstrapSlider");
                             if (slider) {
@@ -232,7 +218,6 @@ function loadDbListeners() {
 
     $("#db_save_config").click(function () {
         let selected = dreamSelect.getModel();
-        console.log("Save model settings click: ", selected);
         if (selected === undefined) {
             alert("Please select a model first!");
         } else {
@@ -271,7 +256,6 @@ function loadConcepts(concepts) {
     let conceptsContainer = $("#advancedConcepts");
     conceptsList = [];
     conceptsContainer[0].innerHTML = "";
-    console.log("Loading: ", concepts);
     if (concepts.length === 0 && showAdvanced) {
         let removeConceptButton = $("#db_concept_remove");
         let controlGroup = $("#conceptControls");
@@ -382,13 +366,11 @@ function addConcept(concept = false) {
     formAccordion.click(function (event) {
         event.preventDefault();
         let idx = $(this).data("index");
-        console.log("Clicked: ", idx);
         lastConcept = idx;
     });
 
     formAccordion.blur(function (event) {
         event.preventDefault();
-        console.log("The element has lost focus.");
     });
 
     conceptsContainer.append(formAccordion);
@@ -409,7 +391,6 @@ function addConcept(concept = false) {
                     </div>
                 `);
             formElements.append(fileBrowser);
-            console.log("Creating file browser: ", concept, key);
             new FileBrowser(document.getElementById(`${inputId}`), {
                 "dropdown": true,
                 "showInfo": false,
@@ -487,7 +468,6 @@ function removeConcept() {
     let c_idx = lastConcept - 1;
     // Remove the element from conceptsList at index c_idx
     conceptsList.splice(c_idx, 1);
-    console.log("Removed concept: ", c_idx, conceptsList);
     loadConcepts(conceptsList);
 }
 
@@ -502,7 +482,6 @@ function getSettings() {
 
     let values = [];
     inputElements.each((index, element) => {
-        console.log("Parsing concept input: ", element, element.value);
         let conceptIndex = element.id.split("-")[0].split("_")[1];
         let key = element.id.split("-")[1];
 
@@ -527,7 +506,6 @@ function getSettings() {
         if (!found) {
             let newValue = {"conceptIndex": conceptIndex};
             newValue[key] = value;
-            console.log("Creating new value: ", newValue);
             values.push(newValue);
         }
     });
@@ -542,12 +520,10 @@ function getSettings() {
         let value;
 
         if (slider) {
-            console.log("SLIDER", slider);
             value = parseInt(slider.value);
         } else if (file) {
             console.log("Filebrowser", file);
-            let browser = element.FileBrowser();
-            value = browser.value;
+            value = file.value;
         } else if (element.is(":checkbox")) {
             value = element.is(":checked");
         } else if (element.is(":radio")) {
@@ -561,8 +537,6 @@ function getSettings() {
         } else {
             value = element.val();
         }
-
-        console.log("Input", id, value);
         settings[id] = value;
     });
 
@@ -588,9 +562,6 @@ function getSettings() {
         concepts_list.push(concepts[concept]);
     }
     settings["concepts_list"] = concepts_list;
-
-    console.log("Collected settings: ", settings);
-
 
     return settings;
 }

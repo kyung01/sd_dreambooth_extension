@@ -24,6 +24,7 @@ from diffusers import (
     DEISMultistepScheduler,
     UniPCMultistepScheduler
 )
+from diffusers.models.attention_processor import AttnProcessor2_0
 from diffusers.utils import logging as dl, is_xformers_available
 from packaging import version
 from tensorflow.python.framework.random_seed import set_seed as set_seed1
@@ -243,7 +244,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             update_status({"status": msg})
             stop_text_percentage = 0
         count, instance_prompts, class_prompts = generate_classifiers(
-            args, class_gen_method=class_gen_method, accelerator=accelerator, ui=False
+            args, class_gen_method=class_gen_method, accelerator=accelerator, ui=False, pbar=mytqdm(user=user)
         )
         if status.interrupted:
             result.msg = "Training interrupted."
@@ -300,13 +301,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             revision=args.revision,
             torch_dtype=torch.float32,
         )
-        unet = torch2ify(unet)
 
-        # Check that all trainable models are in full precision
-        low_precision_error_string = (
-            "Please make sure to always have all model weights in full float32 precision when starting training - "
-            "even if doing mixed precision training. copy of the weights should still be float32."
-        )
         if args.attention == "xformers" and not shared.force_cpu:
             if is_xformers_available():
                 import xformers
@@ -322,6 +317,15 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                 )
             xformerify(unet)
             xformerify(vae)
+
+
+        unet = torch2ify(unet)
+
+        # Check that all trainable models are in full precision
+        low_precision_error_string = (
+            "Please make sure to always have all model weights in full float32 precision when starting training - "
+            "even if doing mixed precision training. copy of the weights should still be float32."
+        )
 
         if accelerator.unwrap_model(unet).dtype != torch.float32:
             logger.warning(
@@ -485,6 +489,13 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             return result
 
         printm("Loading dataset...")
+        td_bar = mytqdm(
+            range(4),
+            disable=not accelerator.is_local_main_process,
+            position=1,
+            user=user,
+            target="dreamProgress"
+        )
         train_dataset = generate_dataset(
             model_name=args.model_name,
             instance_prompts=instance_prompts,
@@ -494,6 +505,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             vae=vae if args.cache_latents else None,
             debug=False,
             model_dir=args.model_dir,
+            pbar=td_bar
         )
 
         printm("Dataset loaded.")
@@ -810,7 +822,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                 optim_to(profiler, optimizer)
 
-                if profiler is not None:
+                if profiler is None:
                     cleanup()
 
                 if vae is None:
@@ -833,25 +845,14 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                 )
 
                 scheduler_class = get_scheduler_class(args.scheduler)
-                if args.attention == "xformers" and not shared.force_cpu:
-                    xformerify(s_pipeline)
-
                 s_pipeline.scheduler = scheduler_class.from_config(
                     s_pipeline.scheduler.config
                 )
                 if "UniPC" in args.scheduler:
                     s_pipeline.scheduler.config.solver_type = "bh2"
 
-                s_pipeline = s_pipeline.to(accelerator.device)
-
-                printm("Patching model with tomesd.")
-                if args.tomesd:
-                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
-
                 with accelerator.autocast(), torch.inference_mode():
                     if save_model:
-                        if args.tomesd:
-                            tomesd.remove_patch(s_pipeline)
                         # We are saving weights, we need to ensure revision is saved
                         args.save()
                         try:
@@ -893,13 +894,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                     )
                                 pbar.update()
 
-                                printm("Patching model with tomesd.")
-                                if args.tomesd:
-                                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
-
                             elif save_lora:
-                                if args.tomesd:
-                                    tomesd.remove_patch(s_pipeline)
                                 pbar.set_description("Saving Lora Weights...")
                                 # setup directory
                                 loras_dir = os.path.join(args.model_dir, "loras")
@@ -953,95 +948,104 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                     compile_checkpoint(args.model_name, reload_models=False, lora_file_name=out_file,
                                                        log=False, snap_rev=snap_rev, pbar=pbar)
                                 printm("Restored, moved to acc.device.")
-
-                                printm("Patching model with tomesd.")
-                                if args.tomesd:
-                                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
-
                         except Exception as ex:
                             logger.warning(f"Exception saving checkpoint/model: {ex}")
                             traceback.print_exc()
                             pass
+                    save_dir = args.model_dir
+                del s_pipeline
+                cleanup()
+                if save_image:
+                    s_pipeline = DiffusionPipeline.from_pretrained(
+                        args.get_pretrained_model_name_or_path(),
+                        vae=vae,
+                        torch_dtype=weight_dtype
+                    )
+                    if args.tomesd:
+                        tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
+
+                    s_pipeline.enable_vae_tiling()
+                    s_pipeline.enable_vae_slicing()
+                    s_pipeline.enable_xformers_memory_efficient_attention()
+                    s_pipeline.enable_sequential_cpu_offload()
+                    
+                    s_pipeline.scheduler = get_scheduler_class("UniPCMultistep").from_config(s_pipeline.scheduler.config)
+                    s_pipeline.scheduler.config.solver_type = "bh2"
+                    samples = []
+                    sample_prompts = []
+                    last_samples = []
+                    last_prompts = []
+                    status.textinfo = (
+                        f"Saving preview image(s) at step {args.revision}..."
+                    )
+                    update_status({"status": status.textinfo})
+                    try:
+                        s_pipeline.set_progress_bar_config(disable=True)
+                        sample_dir = os.path.join(save_dir, "samples")
+                        os.makedirs(sample_dir, exist_ok=True)
+
+                        sd = SampleDataset(args)
+                        prompts = sd.prompts
+                        concepts = args.concepts()
+                        if args.sanity_prompt:
+                            epd = PromptData(
+                                prompt=args.sanity_prompt,
+                                seed=args.sanity_seed,
+                                negative_prompt=concepts[
+                                    0
+                                ].save_sample_negative_prompt,
+                                resolution=(args.resolution, args.resolution),
+                            )
+                            prompts.append(epd)
+                        pbar.set_description("Generating Samples")
+
+                        prompt_lengths = len(prompts)
+                        if args.disable_logging:
+                            pbar.reset(prompt_lengths)
+                        else:
+                            pbar.reset(prompt_lengths + 2)
+
+                        ci = 0
+                        for c in prompts:
+                            c.out_dir = os.path.join(args.model_dir, "samples")
+                            generator = torch.manual_seed(int(c.seed))
+                            s_image = s_pipeline(
+                                c.prompt,
+                                num_inference_steps=c.steps,
+                                guidance_scale=c.scale,
+                                negative_prompt=c.negative_prompt,
+                                height=c.resolution[1],
+                                width=c.resolution[0],
+                                generator=generator,
+                            ).images[0]
+                            sample_prompts.append(c.prompt)
+                            image_name = db_save_image(
+                                s_image,
+                                c,
+                                custom_name=f"sample_{args.revision}-{ci}",
+                            )
+                            shared.status.current_image = image_name
+                            shared.status.sample_prompts = [c.prompt]
+                            update_status({"images": [image_name], "prompts": [c.prompt]})
+                            samples.append(image_name)
+                            pbar.update()
+                            ci += 1
+                        for sample in samples:
+                            last_samples.append(sample)
+                        for prompt in sample_prompts:
+                            last_prompts.append(prompt)
+                        del samples
+                        del prompts
+                    except:
+                        logger.warning(f"Exception saving sample.")
+                        traceback.print_exc()
+                        pass
                     if args.tomesd:
                         tomesd.remove_patch(s_pipeline)
-                    save_dir = args.model_dir
-                    if save_image:
-                        samples = []
-                        sample_prompts = []
-                        last_samples = []
-                        last_prompts = []
-                        status.textinfo = (
-                            f"Saving preview image(s) at step {args.revision}..."
-                        )
-                        update_status({"status": status.textinfo})
-                        try:
-                            s_pipeline.set_progress_bar_config(disable=True)
-                            sample_dir = os.path.join(save_dir, "samples")
-                            os.makedirs(sample_dir, exist_ok=True)
-                            with accelerator.autocast(), torch.inference_mode():
-                                sd = SampleDataset(args)
-                                prompts = sd.prompts
-                                concepts = args.concepts()
-                                if args.sanity_prompt:
-                                    epd = PromptData(
-                                        prompt=args.sanity_prompt,
-                                        seed=args.sanity_seed,
-                                        negative_prompt=concepts[
-                                            0
-                                        ].save_sample_negative_prompt,
-                                        resolution=(args.resolution, args.resolution),
-                                    )
-                                    prompts.append(epd)
-                                pbar.set_description("Generating Samples")
+                    del s_pipeline
 
-                                prompt_lengths = len(prompts)
-                                if args.disable_logging:
-                                    pbar.reset(prompt_lengths)
-                                else:
-                                    pbar.reset(prompt_lengths + 2)
-
-                                ci = 0
-                                for c in prompts:
-                                    c.out_dir = os.path.join(args.model_dir, "samples")
-                                    generator = torch.manual_seed(int(c.seed))
-                                    s_image = s_pipeline(
-                                        c.prompt,
-                                        num_inference_steps=c.steps,
-                                        guidance_scale=c.scale,
-                                        negative_prompt=c.negative_prompt,
-                                        height=c.resolution[1],
-                                        width=c.resolution[0],
-                                        generator=generator,
-                                    ).images[0]
-                                    sample_prompts.append(c.prompt)
-                                    image_name = db_save_image(
-                                        s_image,
-                                        c,
-                                        custom_name=f"sample_{args.revision}-{ci}",
-                                    )
-                                    shared.status.current_image = image_name
-                                    shared.status.sample_prompts = [c.prompt]
-                                    update_status({"images": [image_name], "prompts": [c.prompt]})
-                                    samples.append(image_name)
-                                    pbar.update()
-                                    ci += 1
-                                for sample in samples:
-                                    last_samples.append(sample)
-                                for prompt in sample_prompts:
-                                    last_prompts.append(prompt)
-                                del samples
-                                del prompts
-                                printm("Patching model with tomesd.")
-                                if args.tomesd:
-                                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
-                        except Exception as em:
-                            logger.warning(f"Exception saving sample: {em}")
-                            traceback.print_exc()
-                            pass
                 printm("Starting cleanup.")
-                if args.tomesd:
-                    tomesd.remove_patch(s_pipeline)
-                del s_pipeline
+                cleanup()
                 if save_image:
                     if "generator" in locals():
                         del generator
@@ -1086,6 +1090,8 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                 status.current_image = last_samples
                 update_status({"images": last_samples})
+
+                cleanup()
                 printm("Cleanup.")
 
                 optim_to(profiler, optimizer, accelerator.device)
