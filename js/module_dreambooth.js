@@ -29,13 +29,18 @@ function initDreambooth() {
     }
 
     let prog_opts = {
+    let prog_opts = {
         "primary_status": "Status 1", // Status 1 text
         "secondary_status": "Status 2", // Status 2...
         "bar1_progress": 0, // Progressbar 1 position
         "bar2_progress": 0, // etc
         "id": "dreamProgress" // ID of the progress group
     }
+        "bar2_progress": 0, // etc
+        "id": "dreamProgress" // ID of the progress group
+    }
 
+    let gallery_opts = {
     let gallery_opts = {
         "thumbnail": true,
         "closeable": false,
@@ -143,6 +148,7 @@ function loadDbListeners() {
             }
             data[key] = val;
         });
+        sendMessage("create_dreambooth", data, false, "dreamProgress").then(() => {
         sendMessage("create_dreambooth", data, false, "dreamProgress").then(() => {
             dreamSelect.refresh();
         });

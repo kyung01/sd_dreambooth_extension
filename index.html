@@ -24,6 +24,16 @@
         </div>
         <div class="row">
             <div class="col-12 col-md-6 col-lg-4" id="dbModelCol">
+            <div class="col-12 col-md-6 col-lg-4">
+                <div class="card shadow d-lg-none d-md-block" id="dreamStatusSm">
+                    <div class="card-header">
+                        Output
+                    </div>
+                    <div class="card-body">
+                        <div class="progressGroup" id="dreamProgressSm"></div>
+                        <div class="image-container inline-gallery-container" id="dreamGallerySm"></div>
+                    </div>
+                </div>
                 <div class="card shadow" id="dreamModel">
                     <div class="card-header">Model</div>
                     <div class="card-body">
@@ -82,10 +92,24 @@
                                             <label class="form-check-label" for="512_model">512x Base Model</label>
                                         </div>
                                     </div>
-                                    <div class="form-group">
-                                        <div class="form-check form-switch">
-                                            <input class="newModelParam form-check-input" type="checkbox" id="create_from_hub" name="create_from_hub">
-                                            <label class="form-check-label" for="create_from_hub">Create from Hub</label>
+                                    <div class="row">
+                                        <div class="col-6 db_adv">
+                                            <div class="form-group">
+                                                <div class="form-check form-switch">
+                                                    <input class="form-check-input newModelParam" type="checkbox" id="create_from_hub"
+                                                           name="create_from_hub" data-key="create_from_hub">
+                                                    <label class="form-check-label" for="create_from_hub">Create From Hub</label>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-12">
+                                            <div class="form-group">
+                                                <div class="form-check form-switch">
+                                                    <input class="form-check-input newModelParam" type="checkbox" id="512_model"
+                                                           name="512_model" data-key="512_model" checked>
+                                                    <label class="form-check-label" for="512_model">512x Model</label>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                     <div class="form-group db_advanced" style="display: none;" id="hub_row">
@@ -167,10 +191,10 @@
                             <div class="db-slider dbInput db-advanced" data-elem_id="save_embedding_every"
                                  data-max="100"
                                  data-min="0" data-step="1"
-                                 data-value="0" data-label="Save Weight Frequency"></div>
+                                 data-value="0" data-label="Save Weight Frequency (epochs)"></div>
                             <div class="db-slider dbInput db-advanced" data-elem_id="save_preview_every" data-max="100"
                                  data-min="0" data-step="1"
-                                 data-value="0" data-label="Save Preview Frequency"></div>
+                                 data-value="0" data-label="Save Preview Frequency (epochs)"></div>
                             <div class="db-slider dbInput" data-elem_id="resolution" data-max="1024" data-min="512"
                                  data-step="64"
                                  data-value="768" data-label="Maximum Resolution"></div>
@@ -200,7 +224,7 @@
                                             </div>
 
                                             <div class="form-group">
-                                                <label class="form-label" for="learning_rate">Learning Rate</label>
+                                                <label for="learning_rate">Learning Rate</label>
                                                 <input class="dbInput form-control" type="number" id="learning_rate"
                                                        name="learning_rate" value="0.000002">
                                             </div>
@@ -234,25 +258,24 @@
                                             </div>
                                             <div class="form-group">
                                                 <div class="form-check form-switch">
-                                                    <input class="dbInput form-check-input" type="checkbox"
-                                                           id="shuffle_tags" name="shuffle_tags" checked>
+                                                    <input class="form-check-input" type="checkbox" id="shuffle_tags"
+                                                           name="shuffle_tags" checked>
                                                     <label class="form-check-label" for="shuffle_tags">Shuffle
                                                         Tags</label>
-                                                </div>
-                                            </div>
-                                            <div class="form-group">
-                                                <div class="form-check form-switch">
-                                                    <input class="dbInput form-check-input" type="checkbox"
-                                                           id="strict_tokens"
-                                                           name="strict_tokens" checked>
-                                                    <label class="form-check-label" for="strict_tokens">Strict
-                                                        Tokens</label>
 
                                                 </div>
                                             </div>
                                             <div class="form-group">
                                                 <div class="form-check form-switch">
-                                                    <input class="dbInput form-check-input" type="checkbox"
+                                                    <input class="form-check-input" type="checkbox" id="strict_tokens"
+                                                           name="strict_tokens" checked>
+                                                    <label class="form-check-label" for="strict_tokens">Strict Tokens</label>
+
+                                                </div>
+                                            </div>
+                                            <div class="form-group">
+                                                <div class="form-check form-switch">
+                                                    <input class="form-check-input" type="checkbox"
                                                            id="gradient_checkpointing"
                                                            name="gradient_checkpointing">
                                                     <label class="form-check-label" for="gradient_checkpointing">Gradient
@@ -262,7 +285,7 @@
                                             </div>
                                             <div class="form-group">
                                                 <div class="form-check form-switch">
-                                                    <input class="dbInput form-check-input" type="checkbox"
+                                                    <input class="form-check-input" type="checkbox"
                                                            id="freeze_clip_normalization"
                                                            name="gradient_checkpointing">
                                                     <label class="form-check-label" for="freeze_clip_normalization">Freeze
@@ -277,19 +300,21 @@
                     </div>
                 </div>
             </div>
-            <div class="col-12 col-md-6 col-lg-4" id="dbStatusCol">
-                <div class="card shadow" id="dreamStatus">
-                    <div class="card-header">
-                        Output
-                    </div>
-                    <div class="card-body" id="dreamStatusContainer">
-                        <div class="progressGroup" id="dreamProgress"></div>
-                        <div class="image-container inline-gallery-container" id="dreamGallery"></div>
-                    </div>
-                </div>
+        </div>
+    </div>
+    <div class="col-14 col-md-6 col-lg-4">
+        <div class="card shadow d-md-none d-lg-block" id="dreamStatus">
+            <div class="card-header">
+                Output
+            </div>
+            <div class="card-body">
+                <div class="progressGroup" id="dreamProgress"></div>
+                <div class="image-container inline-gallery-container" id="dreamGallery"></div>
             </div>
         </div>
     </div>
+</div>
+</div>
 </div>
 </div>
 </div>
