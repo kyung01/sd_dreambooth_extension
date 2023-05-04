@@ -27,18 +27,13 @@ function initDreambooth() {
     }
 
     let prog_opts = {
-    let prog_opts = {
         "primary_status": "Status 1", // Status 1 text
         "secondary_status": "Status 2", // Status 2...
         "bar1_progress": 0, // Progressbar 1 position
         "bar2_progress": 0, // etc
         "id": "dreamProgress" // ID of the progress group
     }
-        "bar2_progress": 0, // etc
-        "id": "dreamProgress" // ID of the progress group
-    }
 
-    let gallery_opts = {
     let gallery_opts = {
         "thumbnail": true,
         "closeable": false,
@@ -142,7 +137,6 @@ function loadDbListeners() {
             data[key] = val;
         });
         sendMessage("create_dreambooth", data, false, "dreamProgress").then(() => {
-        sendMessage("create_dreambooth", data, false, "dreamProgress").then(() => {
             dreamSelect.refresh();
         });
     });
@@ -218,6 +212,7 @@ function loadDbListeners() {
 
     $("#db_save_config").click(function () {
         let selected = dreamSelect.getModel();
+        console.log("Save model settings click: ", selected);
         if (selected === undefined) {
             alert("Please select a model first!");
         } else {
@@ -256,6 +251,7 @@ function loadConcepts(concepts) {
     let conceptsContainer = $("#advancedConcepts");
     conceptsList = [];
     conceptsContainer[0].innerHTML = "";
+    console.log("Loading: ", concepts);
     if (concepts.length === 0 && showAdvanced) {
         let removeConceptButton = $("#db_concept_remove");
         let controlGroup = $("#conceptControls");
@@ -366,11 +362,13 @@ function addConcept(concept = false) {
     formAccordion.click(function (event) {
         event.preventDefault();
         let idx = $(this).data("index");
+        console.log("Clicked: ", idx);
         lastConcept = idx;
     });
 
     formAccordion.blur(function (event) {
         event.preventDefault();
+        console.log("The element has lost focus.");
     });
 
     conceptsContainer.append(formAccordion);
@@ -391,6 +389,7 @@ function addConcept(concept = false) {
                     </div>
                 `);
             formElements.append(fileBrowser);
+            console.log("Creating file browser: ", concept, key);
             new FileBrowser(document.getElementById(`${inputId}`), {
                 "dropdown": true,
                 "showInfo": false,
@@ -468,6 +467,7 @@ function removeConcept() {
     let c_idx = lastConcept - 1;
     // Remove the element from conceptsList at index c_idx
     conceptsList.splice(c_idx, 1);
+    console.log("Removed concept: ", c_idx, conceptsList);
     loadConcepts(conceptsList);
 }
 
@@ -482,6 +482,7 @@ function getSettings() {
 
     let values = [];
     inputElements.each((index, element) => {
+        console.log("Parsing concept input: ", element, element.value);
         let conceptIndex = element.id.split("-")[0].split("_")[1];
         let key = element.id.split("-")[1];
 
@@ -506,6 +507,7 @@ function getSettings() {
         if (!found) {
             let newValue = {"conceptIndex": conceptIndex};
             newValue[key] = value;
+            console.log("Creating new value: ", newValue);
             values.push(newValue);
         }
     });
@@ -520,10 +522,12 @@ function getSettings() {
         let value;
 
         if (slider) {
+            console.log("SLIDER", slider);
             value = parseInt(slider.value);
         } else if (file) {
             console.log("Filebrowser", file);
-            value = file.value;
+            let browser = element.FileBrowser();
+            value = browser.value;
         } else if (element.is(":checkbox")) {
             value = element.is(":checked");
         } else if (element.is(":radio")) {
@@ -537,6 +541,8 @@ function getSettings() {
         } else {
             value = element.val();
         }
+
+        console.log("Input", id, value);
         settings[id] = value;
     });
 
@@ -562,6 +568,9 @@ function getSettings() {
         concepts_list.push(concepts[concept]);
     }
     settings["concepts_list"] = concepts_list;
+
+    console.log("Collected settings: ", settings);
+
 
     return settings;
 }
