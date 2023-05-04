@@ -301,7 +301,13 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             revision=args.revision,
             torch_dtype=torch.float32,
         )
+        unet = torch2ify(unet)
 
+        # Check that all trainable models are in full precision
+        low_precision_error_string = (
+            "Please make sure to always have all model weights in full float32 precision when starting training - "
+            "even if doing mixed precision training. copy of the weights should still be float32."
+        )
         if args.attention == "xformers" and not shared.force_cpu:
             if is_xformers_available():
                 import xformers
@@ -845,11 +851,20 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                 )
 
                 scheduler_class = get_scheduler_class(args.scheduler)
+                if args.attention == "xformers" and not shared.force_cpu:
+                    xformerify(s_pipeline)
+
                 s_pipeline.scheduler = scheduler_class.from_config(
                     s_pipeline.scheduler.config
                 )
                 if "UniPC" in args.scheduler:
                     s_pipeline.scheduler.config.solver_type = "bh2"
+
+                s_pipeline = s_pipeline.to(accelerator.device)
+
+                printm("Patching model with tomesd.")
+                if args.tomesd:
+                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
 
                 with accelerator.autocast(), torch.inference_mode():
                     if save_model:
@@ -894,7 +909,6 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                     )
                                 pbar.update()
 
-                            elif save_lora:
                                 pbar.set_description("Saving Lora Weights...")
                                 # setup directory
                                 loras_dir = os.path.join(args.model_dir, "loras")
@@ -961,9 +975,6 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                         vae=vae,
                         torch_dtype=weight_dtype
                     )
-                    if args.tomesd:
-                        tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
-
                     s_pipeline.enable_vae_tiling()
                     s_pipeline.enable_vae_slicing()
                     s_pipeline.enable_xformers_memory_efficient_attention()
