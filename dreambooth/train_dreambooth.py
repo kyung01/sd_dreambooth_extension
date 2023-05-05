@@ -792,10 +792,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     save_checkpoint,
                     save_lora,
                 )
-                #shared.save_model_state(shared.optimizer,shared.scheduler)
-                #shared.save_model_state()
-
-            return save_model
+                return save_model
 
         def save_weights(
                 save_image, save_model, save_snapshot, save_checkpoint, save_lora
