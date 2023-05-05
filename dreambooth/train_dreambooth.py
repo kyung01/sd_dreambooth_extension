@@ -24,9 +24,9 @@ from diffusers import (
     DEISMultistepScheduler,
     UniPCMultistepScheduler
 )
-from diffusers.models.attention_processor import AttnProcessor2_0
 from diffusers.utils import logging as dl, is_xformers_available
 from packaging import version
+from tensorflow.python.framework.random_seed import set_seed as set_seed1
 from torch.cuda.profiler import profile
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
@@ -346,6 +346,10 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                 f"Text encoder loaded as datatype {accelerator.unwrap_model(text_encoder).dtype}."
                 f" {low_precision_error_string}"
             )
+        
+        if args.use_lora:
+            unet.requires_grad_(False)
+            text_encoder.requires_grad_(False)
 
         if args.gradient_checkpointing:
             if args.train_unet:
@@ -787,7 +791,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     or save_lora
                     or save_image
                     or save_model
-                ):
+            ):
                 save_weights(
                     save_image,
                     save_model,
@@ -795,7 +799,8 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     save_checkpoint,
                     save_lora,
                 )
-                return save_model
+
+            return save_model
 
         def save_weights(
                 save_image, save_model, save_snapshot, save_checkpoint, save_lora
@@ -965,7 +970,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                             logger.warning(f"Exception saving checkpoint/model: {ex}")
                             traceback.print_exc()
                             pass
-                    save_dir = args.model_dir
+                save_dir = args.model_dir
                 del s_pipeline
                 cleanup()
                 if save_image:
@@ -974,9 +979,9 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                         vae=vae,
                         torch_dtype=weight_dtype
                     )
+                    xformerify(s_pipeline)
                     s_pipeline.enable_vae_tiling()
                     s_pipeline.enable_vae_slicing()
-                    #s_pipeline.enable_xformers_memory_efficient_attention()
                     s_pipeline.enable_sequential_cpu_offload()
                     
                     s_pipeline.scheduler = get_scheduler_class("UniPCMultistep").from_config(s_pipeline.scheduler.config)
@@ -1148,7 +1153,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             if training_complete:
                 logger.debug("Training complete, breaking epoch.")
                 break
-
+  
             if args.train_unet:
                 unet.train()
             elif args.use_lora and not args.lora_use_buggy_requires_grad:
@@ -1330,10 +1335,6 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                         profiler.step()
 
                     optimizer.zero_grad(set_to_none=args.gradient_set_to_none)
-
-                    # Track current step and epoch for OOM resume
-                    # shared.in_progress_epoch = global_epoch
-                    # shared.in_progress_steps = global_step
 
                 allocated = round(torch.cuda.memory_allocated(0) / 1024 ** 3, 1)
                 cached = round(torch.cuda.memory_reserved(0) / 1024 ** 3, 1)

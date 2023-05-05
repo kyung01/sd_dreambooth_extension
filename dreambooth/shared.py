@@ -180,7 +180,7 @@ class DreamState:
             self.status_handler.end(desc="Interrupted")
         self.interrupted = True
         self.in_progress = False
-
+        
     def interrupt_after_save(self):
         self.interrupted_after_save = True
         self.in_progress = False
@@ -322,7 +322,6 @@ class DreamState:
     def dict(self):
         obj = {
             "do_save_model": self.do_save_model,
-            "do_save_state": self.do_save_state,
             "do_save_samples": self.do_save_samples,
             "interrupted": self.interrupted,
             "job": self.job,
@@ -527,7 +526,10 @@ def load_vars(root_path = None):
             torch.narrow = lambda *args, **kwargs: (orig_narrow(*args, **kwargs).clone())
 
     status = DreamState()
-    
+
+    if state is None:
+        state = status
+
 status_handler = None
 script_path = ""
 models_path = ""
