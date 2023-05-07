@@ -761,24 +761,9 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     save_snapshot = args.save_state_during
                     save_checkpoint = args.save_ckpt_during
 
-            if (
-                    save_checkpoint
-                    or save_snapshot
-                    or save_lora
-                    or save_image
-                    or save_model
-                ):
-                save_weights(
-                    save_image,
-                    save_model,
-                    save_snapshot,
-                    save_checkpoint,
-                    save_lora,
-                )
-                #shared.save_model_state(shared.optimizer,shared.scheduler)
-                #shared.save_model_state()
-
-            return save_model
+            if (save_checkpoint or save_snapshot or save_lora or save_image or save_model):
+                save_weights(save_image, save_model, save_snapshot, save_checkpoint, save_lora)
+                return save_model
 
         def save_weights(
                 save_image, save_model, save_snapshot, save_checkpoint, save_lora
@@ -850,8 +835,6 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                 with accelerator.autocast(), torch.inference_mode():
                     if save_model:
-                        if args.tomesd:
-                            tomesd.remove_patch(s_pipeline)
                         # We are saving weights, we need to ensure revision is saved
                         args.save()
                         try:
@@ -893,13 +876,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                     )
                                 pbar.update()
 
-                                printm("Patching model with tomesd.")
-                                if args.tomesd:
-                                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
-
                             elif save_lora:
-                                if args.tomesd:
-                                    tomesd.remove_patch(s_pipeline)
                                 pbar.set_description("Saving Lora Weights...")
                                 # setup directory
                                 loras_dir = os.path.join(args.model_dir, "loras")
@@ -954,16 +931,10 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                                        log=False, snap_rev=snap_rev, pbar=pbar)
                                 printm("Restored, moved to acc.device.")
 
-                                printm("Patching model with tomesd.")
-                                if args.tomesd:
-                                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
-
                         except Exception as ex:
                             logger.warning(f"Exception saving checkpoint/model: {ex}")
                             traceback.print_exc()
                             pass
-                    if args.tomesd:
-                        tomesd.remove_patch(s_pipeline)
                     save_dir = args.model_dir
                     if save_image:
                         samples = []
@@ -1031,9 +1002,6 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                     last_prompts.append(prompt)
                                 del samples
                                 del prompts
-                                printm("Patching model with tomesd.")
-                                if args.tomesd:
-                                    tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
                         except Exception as em:
                             logger.warning(f"Exception saving sample: {em}")
                             traceback.print_exc()
@@ -1291,7 +1259,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                         if len(instance_chunks) and len(prior_chunks):
                             # Add the prior loss to the instance loss.
-                            loss = instance_loss + (prior_loss * current_prior_loss_weight)
+                            loss = instance_loss + current_prior_loss_weight * prior_loss
                         elif len(instance_chunks):
                             loss = instance_loss
                         else:
@@ -1299,7 +1267,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                     accelerator.backward(loss)
 
-                    if accelerator.sync_gradients and not args.use_lora:
+                    if accelerator.sync_gradients:
                         if train_tenc:
                             params_to_clip = itertools.chain(unet.parameters(), text_encoder.parameters())
                         else:
