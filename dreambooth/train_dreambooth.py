@@ -26,7 +26,6 @@ from diffusers import (
 )
 from diffusers.utils import logging as dl, is_xformers_available
 from packaging import version
-from tensorflow.python.framework.random_seed import set_seed as set_seed1
 from torch.cuda.profiler import profile
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
@@ -113,7 +112,6 @@ def set_seed(deterministic: bool):
     if deterministic:
         torch.backends.cudnn.deterministic = True
         seed = 0
-        set_seed1(seed)
         set_seed2(seed)
     else:
         torch.backends.cudnn.deterministic = False
@@ -309,19 +307,34 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
         )
         if args.attention == "xformers" and not shared.force_cpu:
             if is_xformers_available():
-                import xformers
-
-                xformers_version = version.parse(xformers.__version__)
-                if xformers_version == version.parse("0.0.16"):
-                    logger.warning(
+                try:
+                    import xformers
+                    xformers_version = version.parse(xformers.__version__)
+                    if xformers_version == version.parse("0.0.16"):
+                        logger.warning(
                         "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
-                    )
-            else:
-                raise ValueError(
-                    "xformers is not available. Make sure it is installed correctly"
-                )
-            xformerify(unet)
-            xformerify(vae)
+                        )
+                    xformerify(unet)
+                    xformerify(vae)
+                except:
+                    pass
+                    
+            elif is_xformers_available == False:
+                raise ValueError("xFormers is not available. Falling back to SDP")
+                try:
+                    from diffusers.models.attention_processor import AttnProcessor2_0
+                    xformerify(unet)
+                    xformerify(vae)
+                except:
+                    pass        
+        else:
+            try:
+                from diffusers.models.attention_processor import AttnProcessor2_0
+                xformerify(unet)
+                xformerify(vae)
+            except:
+                pass
+
 
         if accelerator.unwrap_model(unet).dtype != torch.float32:
             logger.warning(
@@ -841,7 +854,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                 )
 
                 scheduler_class = get_scheduler_class(args.scheduler)
-                if args.attention == "xformers" and not shared.force_cpu:
+                if not shared.force_cpu:
                     xformerify(s_pipeline)
 
                 s_pipeline.scheduler = scheduler_class.from_config(
@@ -959,7 +972,26 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                             traceback.print_exc()
                             pass
                     save_dir = args.model_dir
+                    if tomesd:
+                        tomesd.remove_patch(s_pipeline)
+                    del s_pipeline
+                    cleanup()
+
                     if save_image:
+                        s_pipeline = DiffusionPipeline.from_pretrained(
+                            args.get_pretrained_model_name_or_path(),
+                            vae=vae,
+                            torch_dtype=weight_dtype
+                            )
+                        if args.tomesd:
+                            tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
+
+                        s_pipeline.enable_vae_tiling()
+                        s_pipeline.enable_vae_slicing()
+                        s_pipeline.enable_sequential_cpu_offload()
+                        xformerify(s_pipeline)
+                        s_pipeline.scheduler = get_scheduler_class("UniPCMultistep").from_config(s_pipeline.scheduler.config)
+                        s_pipeline.scheduler.config.solver_type = "bh2"
                         samples = []
                         sample_prompts = []
                         last_samples = []
@@ -972,70 +1004,69 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                             s_pipeline.set_progress_bar_config(disable=True)
                             sample_dir = os.path.join(save_dir, "samples")
                             os.makedirs(sample_dir, exist_ok=True)
-                            with accelerator.autocast(), torch.inference_mode():
-                                sd = SampleDataset(args)
-                                prompts = sd.prompts
-                                concepts = args.concepts()
-                                if args.sanity_prompt:
-                                    epd = PromptData(
-                                        prompt=args.sanity_prompt,
-                                        seed=args.sanity_seed,
-                                        negative_prompt=concepts[
-                                            0
-                                        ].save_sample_negative_prompt,
-                                        resolution=(args.resolution, args.resolution),
-                                    )
-                                    prompts.append(epd)
-                                pbar.set_description("Generating Samples")
+                            sd = SampleDataset(args)
+                            prompts = sd.prompts
+                            concepts = args.concepts()
+                            if args.sanity_prompt:
+                                epd = PromptData(
+                                    prompt=args.sanity_prompt,
+                                    seed=args.sanity_seed,
+                                    negative_prompt=concepts[
+                                        0
+                                    ].save_sample_negative_prompt,
+                                    resolution=(args.resolution, args.resolution),
+                                )
+                                prompts.append(epd)
+                            pbar.set_description("Generating Samples")
 
-                                prompt_lengths = len(prompts)
-                                if args.disable_logging:
-                                    pbar.reset(prompt_lengths)
-                                else:
-                                    pbar.reset(prompt_lengths + 2)
+                            prompt_lengths = len(prompts)
+                            if args.disable_logging:
+                                pbar.reset(prompt_lengths)
+                            else:
+                                pbar.reset(prompt_lengths + 2)
 
-                                ci = 0
-                                for c in prompts:
-                                    c.out_dir = os.path.join(args.model_dir, "samples")
-                                    generator = torch.manual_seed(int(c.seed))
-                                    s_image = s_pipeline(
-                                        c.prompt,
-                                        num_inference_steps=c.steps,
-                                        guidance_scale=c.scale,
-                                        negative_prompt=c.negative_prompt,
-                                        height=c.resolution[1],
-                                        width=c.resolution[0],
-                                        generator=generator,
-                                    ).images[0]
-                                    sample_prompts.append(c.prompt)
-                                    image_name = db_save_image(
-                                        s_image,
-                                        c,
-                                        custom_name=f"sample_{args.revision}-{ci}",
-                                    )
-                                    shared.status.current_image = image_name
-                                    shared.status.sample_prompts = [c.prompt]
-                                    update_status({"images": [image_name], "prompts": [c.prompt]})
-                                    samples.append(image_name)
-                                    pbar.update()
-                                    ci += 1
-                                for sample in samples:
-                                    last_samples.append(sample)
-                                for prompt in sample_prompts:
-                                    last_prompts.append(prompt)
-                                del samples
-                                del prompts
+                            ci = 0
+                            for c in prompts:
+                                c.out_dir = os.path.join(args.model_dir, "samples")
+                                generator = torch.manual_seed(int(c.seed))
+                                s_image = s_pipeline(
+                                    c.prompt,
+                                    num_inference_steps=c.steps,
+                                    guidance_scale=c.scale,
+                                    negative_prompt=c.negative_prompt,
+                                    height=c.resolution[1],
+                                    width=c.resolution[0],
+                                    generator=generator,
+                                ).images[0]
+                                sample_prompts.append(c.prompt)
+                                image_name = db_save_image(
+                                    s_image,
+                                    c,
+                                    custom_name=f"sample_{args.revision}-{ci}",
+                                )
+                                shared.status.current_image = image_name
+                                shared.status.sample_prompts = [c.prompt]
+                                update_status({"images": [image_name], "prompts": [c.prompt]})
+                                samples.append(image_name)
+                                pbar.update()
+                                ci += 1
+                            for sample in samples:
+                                last_samples.append(sample)
+                            for prompt in sample_prompts:
+                                last_prompts.append(prompt)
+                            del samples
+                            del prompts
                         except Exception as em:
-                            logger.warning(f"Exception saving sample: {em}")
-                            traceback.print_exc()
-                            pass
-                printm("Starting cleanup.")
-                if args.tomesd:
-                    tomesd.remove_patch(s_pipeline)
-                del s_pipeline
-                if save_image:
-                    if "generator" in locals():
-                        del generator
+                                logger.warning(f"Exception saving sample: {em}")
+                                traceback.print_exc()
+                                pass
+                    printm("Starting cleanup.")
+                    if args.tomesd:
+                        tomesd.remove_patch(s_pipeline)
+                    del s_pipeline
+                    if save_image:
+                        if "generator" in locals():
+                            del generator
 
                     if not args.disable_logging:
                         try:
