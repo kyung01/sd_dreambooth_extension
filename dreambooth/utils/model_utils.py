@@ -247,7 +247,15 @@ def enable_safe_unpickle():
 
 
 def xformerify(obj):
-    if shared.db_model_config.attention is not "xformers":
+    if shared.db_model_config.attention == "xformers":
+        try:
+            print("Enabling xformers memory efficient attention for unet")
+            obj.enable_xformers_memory_efficient_attention()
+        except ModuleNotFoundError:
+            print("xformers not found, using default attention")
+        except:
+            pass
+    else:
         try:
             from diffusers.models.attention_processor import AttnProcessor2_0
             print("Enabling SDP")
@@ -255,12 +263,7 @@ def xformerify(obj):
             return
         except:
             pass
-    else:
-        try:
-            print("Enabling xformers memory efficient attention for unet")
-            obj.enable_xformers_memory_efficient_attention()
-        except ModuleNotFoundError:
-            print("xformers not found, using default attention")
+
 
 
 def torch2ify(unet):
