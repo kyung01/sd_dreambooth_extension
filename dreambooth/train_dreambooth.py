@@ -800,7 +800,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     save_lora,
                 )
 
-            return save_model
+                return save_model
 
         def save_weights(
                 save_image, save_model, save_snapshot, save_checkpoint, save_lora
@@ -913,6 +913,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                     )
                                 pbar.update()
 
+                            elif save_lora:
                                 pbar.set_description("Saving Lora Weights...")
                                 # setup directory
                                 loras_dir = os.path.join(args.model_dir, "loras")
@@ -1312,7 +1313,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                         if len(instance_chunks) and len(prior_chunks):
                             # Add the prior loss to the instance loss.
-                            loss = instance_loss + (prior_loss * current_prior_loss_weight)
+                            loss = instance_loss + current_prior_loss_weight * prior_loss
                         elif len(instance_chunks):
                             loss = instance_loss
                         else:
@@ -1320,7 +1321,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                     accelerator.backward(loss)
 
-                    if accelerator.sync_gradients and not args.use_lora:
+                    if accelerator.sync_gradients:
                         if train_tenc:
                             params_to_clip = itertools.chain(unet.parameters(), text_encoder.parameters())
                         else:

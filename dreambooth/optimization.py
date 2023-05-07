@@ -623,7 +623,7 @@ def get_optimizer(args, params_to_optimize):
                 params_to_optimize,
                 lr=args.learning_rate,
                 weight_decay=args.weight_decay,
-                growth_rate=dadaptInf(False),
+                #growth_rate=dadaptInf(False),
                 log_every=log_dadapt(True)
             )
 
@@ -633,7 +633,7 @@ def get_optimizer(args, params_to_optimize):
                 params_to_optimize,
                 lr=args.learning_rate,
                 weight_decay=args.weight_decay,
-                growth_rate=dadaptInf(False),
+                #=dadaptInf(False),
                 log_every=log_dadapt(True)
             )
 
