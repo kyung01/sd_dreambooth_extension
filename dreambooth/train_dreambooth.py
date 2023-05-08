@@ -1381,7 +1381,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     if args.split_loss:
                         if dadapt(args.optimizer):
                             logs = {
-                                "dlr": float(dlr_unet),
+                                "lr": float(dlr_unet),
                                 "loss": float(loss_step),
                                 "inst_loss": float(instance_loss.detach().item()),
                                 "prior_loss": float(prior_loss.detach().item()),
@@ -1399,7 +1399,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     else:
                         if dadapt(args.optimizer):
                             logs = {
-                                "dlr": float(dlr_unet),
+                                "lr": float(dlr_unet),
                                 "loss": float(loss_step),
                                 "vram": float(cached),
                             }
