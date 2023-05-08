@@ -16,6 +16,7 @@ import torch
 import torch.backends.cuda
 import torch.backends.cudnn
 from accelerate import Accelerator
+from accelerate.utils.random import set_seed as set_seed1
 from accelerate.utils.random import set_seed as set_seed2
 from diffusers import (
     AutoencoderKL,
@@ -102,7 +103,7 @@ except:
 
 
 def dadapt(optimizer):
-    if optimizer == "AdamW Dadaptation" or optimizer == "Adan Dadaptation":
+    if optimizer == "AdamW Dadaptation" or optimizer == "Adan Dadaptation" or optimizer == "AdanIP Dadaptation":
         return True
     else:
         return False
@@ -112,6 +113,7 @@ def set_seed(deterministic: bool):
     if deterministic:
         torch.backends.cudnn.deterministic = True
         seed = 0
+        set_seed1(seed)
         set_seed2(seed)
     else:
         torch.backends.cudnn.deterministic = False
@@ -317,16 +319,14 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     xformerify(unet)
                     xformerify(vae)
                 except:
-                    pass
-                    
-            elif is_xformers_available == False:
-                raise ValueError("xFormers is not available. Falling back to SDP")
-                try:
-                    from diffusers.models.attention_processor import AttnProcessor2_0
-                    xformerify(unet)
-                    xformerify(vae)
-                except:
-                    pass        
+                    raise ValueError("xFormers is not available. Falling back to SDP")
+                    try:
+                        from diffusers.models.attention_processor import AttnProcessor2_0
+                        xformerify(unet)
+                        xformerify(vae)
+                    except:
+                        pass
+                      
         else:
             try:
                 from diffusers.models.attention_processor import AttnProcessor2_0
@@ -454,7 +454,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             params_to_optimize = unet.parameters()
 
         optimizer = get_optimizer(args, params_to_optimize)
-        if len(optimizer.param_groups) > 1:
+        if len(optimizer.param_groups) == 2:
             try:
                 optimizer.param_groups[1]["weight_decay"] = args.tenc_weight_decay
                 optimizer.param_groups[1]["grad_clip_norm"] = args.tenc_grad_clip_norm
@@ -1335,124 +1335,138 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                     optimizer.zero_grad(set_to_none=args.gradient_set_to_none)
 
-                    # Track current step and epoch for OOM resume
-                    # shared.in_progress_epoch = global_epoch
-                    # shared.in_progress_steps = global_step
+                    allocated = round(torch.cuda.memory_allocated(0) / 1024 ** 3, 1)
+                    cached = round(torch.cuda.memory_reserved(0) / 1024 ** 3, 1)
+                    last_lr = lr_scheduler.get_last_lr()[0]
 
-                allocated = round(torch.cuda.memory_allocated(0) / 1024 ** 3, 1)
-                cached = round(torch.cuda.memory_reserved(0) / 1024 ** 3, 1)
-                last_lr = lr_scheduler.get_last_lr()[0]
+                    global_step += train_batch_size
+                    args.revision += train_batch_size
+                    status.job_no += train_batch_size
+                    update_status({"progress_1_job_no": status.job_no})
+                    del noise_pred
+                    del latents
+                    del encoder_hidden_states
+                    del noise
+                    del timesteps
+                    del noisy_latents
+                    del target
 
-                global_step += train_batch_size
-                args.revision += train_batch_size
-                status.job_no += train_batch_size
-                update_status({"progress_1_job_no": status.job_no})
-                del noise_pred
-                del latents
-                del encoder_hidden_states
-                del noise
-                del timesteps
-                del noisy_latents
-                del target
-
-                dlr_unet, dlr_tenc = None, None
-                if dadapt(args.optimizer):
-                    dlr_unet = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
-                    if len(optimizer.param_groups) > 1:
-                        try:
-                            dlr_tenc = optimizer.param_groups[1]["d"] * optimizer.param_groups[1]["lr"]
-                        except:
-                            logger.warning("Exception setting tenc weight decay")
-                            traceback.print_exc()
-
-                loss_step = loss.detach().item()
-                loss_total += loss_step
-
-                if args.split_loss:
+                    dlr_unet, dlr_tenc = None, None
                     if dadapt(args.optimizer):
-                        logs = {
-                            "lr": float(dlr_unet),
-                            # "dlr_tenc": float(dlr_tenc),
-                            "loss": float(loss_step),
-                            "inst_loss": float(instance_loss.detach().item()),
-                            "prior_loss": float(prior_loss.detach().item()),
-                            "vram": float(cached),
-                        }
-                    else:
-                        logs = {
-                            "lr": float(last_lr),
-                            "loss": float(loss_step),
-                            "inst_loss": float(instance_loss.detach().item()),
-                            "prior_loss": float(prior_loss.detach().item()),
-                            "vram": float(cached),
-                        }
+                        dlr_unet = None
+                        dlr_tenc = None
+                        if len(optimizer.param_groups) == 2:
+                            try:
+                                dlr_unet = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
+                                dlr_tenc = optimizer.param_groups[1]["d"] * optimizer.param_groups[1]["lr"]
+                            except:
+                                logger.warning("Exception setting DLR")
+                                traceback.print_exc()
+                        elif len(optimizer.param_groups) == 1 and train_tenc:
+                            if (args.use_lora):
+                                logger.warning("Tenc only is an unsupported configuration for LORA. \
+                                            If you want to train Tenc without Unet set Unet LR to 0")
+                            else:
+                                try: 
+                                    dlr_tenc = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
+                                except:
+                                    logger.warning("Exception setting tenc weight decay")
+                                    traceback.print_exc()
 
-                else:
+                    loss_step = loss.detach().item()
+                    loss_total += loss_step
+
+                    if (dlr_unet is None and dlr_tenc is not None):
+                        dlr_unet = dlr_tenc 
+                    if args.split_loss:
+                        if dadapt(args.optimizer):
+                            logs = {
+                                "dlr": float(dlr_unet),
+                                "loss": float(loss_step),
+                                "inst_loss": float(instance_loss.detach().item()),
+                                "prior_loss": float(prior_loss.detach().item()),
+                                "vram": float(cached),
+                            }
+                        else:
+                            logs = {
+                                "lr": float(last_lr),
+                                "loss": float(loss_step),
+                                "inst_loss": float(instance_loss.detach().item()),
+                                "prior_loss": float(prior_loss.detach().item()),
+                                "vram": float(cached),
+                            }
+
+                    else:
+                        if dadapt(args.optimizer):
+                            logs = {
+                                "dlr": float(dlr_unet),
+                                "loss": float(loss_step),
+                                "vram": float(cached),
+                            }
+                        else:
+                            logs = {
+                                "lr": float(last_lr),
+                                "loss": float(loss_step),
+                                "vram": float(cached),
+                            }
+
                     if dadapt(args.optimizer):
-                        logs = {
-                            "lr": float(dlr_unet),
-                            # "dlr_tenc": float(dlr_tenc),
-                            "loss": float(loss_step),
-                            "vram": float(cached),
-                        }
+                        status.textinfo2 = (
+                            f"Loss: {'%.2f' % loss_step}, DLR: {'{:.2E}'.format(Decimal(dlr_unet))}, "
+                            f"VRAM: {allocated}/{cached} GB"
+                        )
                     else:
-                        logs = {
-                            "lr": float(last_lr),
-                            "loss": float(loss_step),
-                            "vram": float(cached),
-                        }
+                        status.textinfo2 = (
+                            f"Loss: {'%.2f' % loss_step}, LR: {'{:.2E}'.format(Decimal(last_lr))}, "
+                            f"VRAM: {allocated}/{cached} GB"
+                        )
+                    update_status({"status2": status.textinfo2})
+                    progress_bar.update(train_batch_size)
+                    progress_bar.set_postfix(**logs)
+                    accelerator.log(logs, step=args.revision)
 
-                if dlr_tenc:
-                    status.textinfo2 = (
-                        f"Loss: {'%.2f' % loss_step}, UNET DLR: {'{:.2E}'.format(Decimal(dlr_unet))}, TENC DLR: {'{:.2E}'.format(Decimal(dlr_tenc))}, "
-                        f"VRAM: {allocated}/{cached} GB"
-                    )
-                else:
-                    status.textinfo2 = (
-                        f"Loss: {'%.2f' % loss_step}, LR: {'{:.2E}'.format(Decimal(last_lr))}, "
-                        f"VRAM: {allocated}/{cached} GB"
-                    )
-                update_status({"status2": status.textinfo2})
-                progress_bar.update(train_batch_size)
-                progress_bar.set_postfix(**logs)
-                accelerator.log(logs, step=args.revision)
+                    logs = {"epoch_loss": loss_total / len(train_dataloader)}
+                    accelerator.log(logs, step=global_step)
 
-                logs = {"epoch_loss": loss_total / len(train_dataloader)}
-                accelerator.log(logs, step=global_step)
-
-                status.job_count = max_train_steps
-                status.job_no = global_step
-
-                status.textinfo = (
-                    f"Steps: {global_step}/{max_train_steps} (Current),"
-                    f" {args.revision}/{lifetime_step + max_train_steps} (Lifetime), Epoch: {global_epoch}"
-                )
-                update_status({"progress_1_job_no": status.job_no, "progress_1_job_count": status.job_count, "status": status.textinfo})
-
-                if math.isnan(loss_step):
-                    logger.warning("Loss is NaN, your model is dead. Cancelling training.")
-                    status.interrupted = True
-                    if status_handler:
-                        status_handler.end("Training interrrupted due to NaN loss.")
-
-                # Log completion message
-                if training_complete or status.interrupted:
-                    shared.in_progress = False
-                    shared.in_progress_step = 0
-                    shared.in_progress_epoch = 0
-                    logger.debug("  Training complete (step check).")
-                    if status.interrupted:
-                        state = "canceled"
-                    else:
-                        state = "complete"
+                    status.job_count = max_train_steps
+                    status.job_no = global_step
 
                     status.textinfo = (
-                        f"Training {state} {global_step}/{max_train_steps}, {args.revision}"
-                        f" total."
+                        f"Steps: {global_step}/{max_train_steps} (Current),"
+                        f" {args.revision}/{lifetime_step + max_train_steps} (Lifetime), Epoch: {global_epoch}"
                     )
-                    if status_handler:
-                        status_handler.end(status.textinfo)
-                    break
+                    update_status({"progress_1_job_no": status.job_no, "progress_1_job_count": status.job_count, "status": status.textinfo})
+
+                    if math.isnan(loss_step):
+                        logger.warning("Loss is NaN, your model is dead. Cancelling training.")
+                        status.interrupted = True
+                        if status_handler:
+                            status_handler.end("Training interrrupted due to NaN loss.")
+                    elif  math.isnan(dlr_unet) or math.isnan(dlr_tenc):
+                        logger.warning("DLR is NaN. This is probably a bug in the Dadapation library. Training cancelled.")
+                        status.interrupted = True
+                        if status_handler:
+                            status_handler.end("Training interrrupted due to DLR NaN.")
+    
+
+                    # Log completion message
+                    if training_complete or status.interrupted:
+                        shared.in_progress = False
+                        shared.in_progress_step = 0
+                        shared.in_progress_epoch = 0
+                        logger.debug("  Training complete (step check).")
+                        if status.interrupted:
+                            state = "canceled"
+                        else:
+                            state = "complete"
+
+                        status.textinfo = (
+                            f"Training {state} {global_step}/{max_train_steps}, {args.revision}"
+                            f" total."
+                        )
+                        if status_handler:
+                            status_handler.end(status.textinfo)
+                        break
 
             accelerator.wait_for_everyone()
 
@@ -1476,10 +1490,10 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                 else:
                     state = "complete"
 
-                status.textinfo = (
-                    f"Training {state} {global_step}/{max_train_steps}, {args.revision}"
-                    f" total."
-                )
+                    status.textinfo = (
+                        f"Training {state} {global_step}/{max_train_steps}, {args.revision}"
+                        f" total."
+                        )
                 if status_handler:
                     status_handler.end(status.textinfo)
                 break
@@ -1501,7 +1515,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                 status_handler.end("Training interrrupted.")
                             break
                         time.sleep(1)
-
+                        
         cleanup_memory()
         accelerator.end_training()
         result.msg = msg
