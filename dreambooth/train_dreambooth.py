@@ -16,7 +16,6 @@ import torch
 import torch.backends.cuda
 import torch.backends.cudnn
 from accelerate import Accelerator
-from accelerate.utils.random import set_seed as set_seed1
 from accelerate.utils.random import set_seed as set_seed2
 from diffusers import (
     AutoencoderKL,
@@ -27,6 +26,7 @@ from diffusers import (
 )
 from diffusers.utils import logging as dl, is_xformers_available
 from packaging import version
+from tensorflow.python.framework.random_seed import set_seed as set_seed1
 from torch.cuda.profiler import profile
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
@@ -307,35 +307,13 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             "Please make sure to always have all model weights in full float32 precision when starting training - "
             "even if doing mixed precision training. copy of the weights should still be float32."
         )
-        if args.attention == "xformers" and not shared.force_cpu:
-            if is_xformers_available():
-                try:
-                    import xformers
-                    xformers_version = version.parse(xformers.__version__)
-                    if xformers_version == version.parse("0.0.16"):
-                        logger.warning(
-                        "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
-                        )
-                    xformerify(unet)
-                    xformerify(vae)
-                except:
-                    raise ValueError("xFormers is not available. Falling back to SDP")
-                    try:
-                        from diffusers.models.attention_processor import AttnProcessor2_0
-                        xformerify(unet)
-                        xformerify(vae)
-                    except:
-                        pass
-                      
-        else:
-            try:
-                from diffusers.models.attention_processor import AttnProcessor2_0
-                xformerify(unet)
-                xformerify(vae)
-            except:
-                pass
 
-
+        try:
+            xformerify(unet)
+            xformerify(vae)
+        except:
+            pass
+        
         if accelerator.unwrap_model(unet).dtype != torch.float32:
             logger.warning(
                 f"Unet loaded as datatype {accelerator.unwrap_model(unet).dtype}. {low_precision_error_string}"
@@ -381,9 +359,11 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     revision=args.revision,
                     torch_dtype=torch.float32,
                 )
-                if args.attention == "xformers" and not shared.force_cpu:
+                try:
                     xformerify(ema_unet)
-
+                except:
+                    pass
+                
                 ema_model = EMAModel(
                     ema_unet, device=accelerator.device, dtype=weight_dtype
                 )
@@ -854,9 +834,10 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                 )
 
                 scheduler_class = get_scheduler_class(args.scheduler)
-                if not shared.force_cpu:
+                try:
                     xformerify(s_pipeline)
-
+                except:
+                    pass
                 s_pipeline.scheduler = scheduler_class.from_config(
                     s_pipeline.scheduler.config
                 )
@@ -972,26 +953,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                             traceback.print_exc()
                             pass
                     save_dir = args.model_dir
-                    if tomesd:
-                        tomesd.remove_patch(s_pipeline)
-                    del s_pipeline
-                    cleanup()
-
                     if save_image:
-                        s_pipeline = DiffusionPipeline.from_pretrained(
-                            args.get_pretrained_model_name_or_path(),
-                            vae=vae,
-                            torch_dtype=weight_dtype
-                            )
-                        if args.tomesd:
-                            tomesd.apply_patch(s_pipeline, ratio=args.tomesd, use_rand=False)
-
-                        s_pipeline.enable_vae_tiling()
-                        s_pipeline.enable_vae_slicing()
-                        s_pipeline.enable_sequential_cpu_offload()
-                        xformerify(s_pipeline)
-                        s_pipeline.scheduler = get_scheduler_class("UniPCMultistep").from_config(s_pipeline.scheduler.config)
-                        s_pipeline.scheduler.config.solver_type = "bh2"
                         samples = []
                         sample_prompts = []
                         last_samples = []
@@ -1004,69 +966,72 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                             s_pipeline.set_progress_bar_config(disable=True)
                             sample_dir = os.path.join(save_dir, "samples")
                             os.makedirs(sample_dir, exist_ok=True)
-                            sd = SampleDataset(args)
-                            prompts = sd.prompts
-                            concepts = args.concepts()
-                            if args.sanity_prompt:
-                                epd = PromptData(
-                                    prompt=args.sanity_prompt,
-                                    seed=args.sanity_seed,
-                                    negative_prompt=concepts[
-                                        0
-                                    ].save_sample_negative_prompt,
-                                    resolution=(args.resolution, args.resolution),
-                                )
-                                prompts.append(epd)
-                            pbar.set_description("Generating Samples")
+                            with accelerator.autocast(), torch.inference_mode():
+                                sd = SampleDataset(args)
+                                prompts = sd.prompts
+                                concepts = args.concepts()
+                                if args.sanity_prompt:
+                                    epd = PromptData(
+                                        prompt=args.sanity_prompt,
+                                        seed=args.sanity_seed,
+                                        negative_prompt=concepts[
+                                            0
+                                        ].save_sample_negative_prompt,
+                                        resolution=(args.resolution, args.resolution),
+                                    )
+                                    prompts.append(epd)
+                                pbar.set_description("Generating Samples")
 
-                            prompt_lengths = len(prompts)
-                            if args.disable_logging:
-                                pbar.reset(prompt_lengths)
-                            else:
-                                pbar.reset(prompt_lengths + 2)
+                                prompt_lengths = len(prompts)
+                                if args.disable_logging:
+                                    pbar.reset(prompt_lengths)
+                                else:
+                                    pbar.reset(prompt_lengths + 2)
 
-                            ci = 0
-                            for c in prompts:
-                                c.out_dir = os.path.join(args.model_dir, "samples")
-                                generator = torch.manual_seed(int(c.seed))
-                                s_image = s_pipeline(
-                                    c.prompt,
-                                    num_inference_steps=c.steps,
-                                    guidance_scale=c.scale,
-                                    negative_prompt=c.negative_prompt,
-                                    height=c.resolution[1],
-                                    width=c.resolution[0],
-                                    generator=generator,
-                                ).images[0]
-                                sample_prompts.append(c.prompt)
-                                image_name = db_save_image(
-                                    s_image,
-                                    c,
-                                    custom_name=f"sample_{args.revision}-{ci}",
-                                )
-                                shared.status.current_image = image_name
-                                shared.status.sample_prompts = [c.prompt]
-                                update_status({"images": [image_name], "prompts": [c.prompt]})
-                                samples.append(image_name)
-                                pbar.update()
-                                ci += 1
-                            for sample in samples:
-                                last_samples.append(sample)
-                            for prompt in sample_prompts:
-                                last_prompts.append(prompt)
-                            del samples
-                            del prompts
+                                ci = 0
+                                for c in prompts:
+                                    c.out_dir = os.path.join(args.model_dir, "samples")
+                                    generator = torch.manual_seed(int(c.seed))
+                                    s_image = s_pipeline(
+                                        c.prompt,
+                                        num_inference_steps=c.steps,
+                                        guidance_scale=c.scale,
+                                        negative_prompt=c.negative_prompt,
+                                        height=c.resolution[1],
+                                        width=c.resolution[0],
+                                        generator=generator,
+                                    ).images[0]
+                                    sample_prompts.append(c.prompt)
+                                    image_name = db_save_image(
+                                        s_image,
+                                        c,
+                                        custom_name=f"sample_{args.revision}-{ci}",
+                                    )
+                                    shared.status.current_image = image_name
+                                    shared.status.sample_prompts = [c.prompt]
+                                    update_status({"images": [image_name], "prompts": [c.prompt]})
+                                    samples.append(image_name)
+                                    pbar.update()
+                                    ci += 1
+                                for sample in samples:
+                                    last_samples.append(sample)
+                                for prompt in sample_prompts:
+                                    last_prompts.append(prompt)
+                                del samples
+                                del prompts
                         except Exception as em:
-                                logger.warning(f"Exception saving sample: {em}")
-                                traceback.print_exc()
-                                pass
-                    printm("Starting cleanup.")
-                    if args.tomesd:
-                        tomesd.remove_patch(s_pipeline)
-                    del s_pipeline
-                    if save_image:
-                        if "generator" in locals():
-                            del generator
+                            logger.warning(f"Exception saving sample: {em}")
+                            traceback.print_exc()
+                            pass
+                printm("Starting cleanup.")
+                if args.tomesd:
+                    tomesd.remove_patch(s_pipeline)
+                cleanup()
+                del s_pipeline
+                
+                if save_image:
+                    if "generator" in locals():
+                        del generator
 
                     if not args.disable_logging:
                         try:
@@ -1108,8 +1073,6 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
 
                 status.current_image = last_samples
                 update_status({"images": last_samples})
-                printm("Cleanup.")
-
                 optim_to(profiler, optimizer, accelerator.device)
 
                 # Restore all random states to avoid having sampling impact training.
@@ -1339,134 +1302,130 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                     cached = round(torch.cuda.memory_reserved(0) / 1024 ** 3, 1)
                     last_lr = lr_scheduler.get_last_lr()[0]
 
-                    global_step += train_batch_size
-                    args.revision += train_batch_size
-                    status.job_no += train_batch_size
-                    update_status({"progress_1_job_no": status.job_no})
-                    del noise_pred
-                    del latents
-                    del encoder_hidden_states
-                    del noise
-                    del timesteps
-                    del noisy_latents
-                    del target
+                global_step += train_batch_size
+                args.revision += train_batch_size
+                status.job_no += train_batch_size
+                update_status({"progress_1_job_no": status.job_no})
+                del noise_pred
+                del latents
+                del encoder_hidden_states
+                del noise
+                del timesteps
+                del noisy_latents
+                del target
 
-                    dlr_unet, dlr_tenc = None, None
-                    if dadapt(args.optimizer):
-                        dlr_unet = None
-                        dlr_tenc = None
+                dlr_unet = None
+                dlr_tenc = None
+                if dadapt(args.optimizer):
+                    try:
                         if len(optimizer.param_groups) == 2:
-                            try:
-                                dlr_unet = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
-                                dlr_tenc = optimizer.param_groups[1]["d"] * optimizer.param_groups[1]["lr"]
-                            except:
-                                logger.warning("Exception setting DLR")
-                                traceback.print_exc()
-                        elif len(optimizer.param_groups) == 1 and train_tenc:
-                            if (args.use_lora):
-                                logger.warning("Tenc only is an unsupported configuration for LORA. \
-                                            If you want to train Tenc without Unet set Unet LR to 0")
-                            else:
-                                try: 
+                            dlr_unet = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
+                            dlr_tenc = optimizer.param_groups[1]["d"] * optimizer.param_groups[1]["lr"]
+                        elif len(optimizer.param_groups) == 1:
+                                if train_tenc:
                                     dlr_tenc = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
-                                except:
-                                    logger.warning("Exception setting tenc weight decay")
-                                    traceback.print_exc()
+                                else:
+                                    dlr_unet = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
+                    except:
+                            logger.warning("Exception setting dlr to param groups")
+                            traceback.print_exc()
 
-                    loss_step = loss.detach().item()
-                    loss_total += loss_step
+                loss_step = loss.detach().item()
+                loss_total += loss_step
 
-                    if (dlr_unet is None and dlr_tenc is not None):
-                        dlr_unet = dlr_tenc 
-                    if args.split_loss:
-                        if dadapt(args.optimizer):
-                            logs = {
-                                "lr": float(dlr_unet),
-                                "loss": float(loss_step),
-                                "inst_loss": float(instance_loss.detach().item()),
-                                "prior_loss": float(prior_loss.detach().item()),
-                                "vram": float(cached),
-                            }
-                        else:
-                            logs = {
-                                "lr": float(last_lr),
-                                "loss": float(loss_step),
-                                "inst_loss": float(instance_loss.detach().item()),
-                                "prior_loss": float(prior_loss.detach().item()),
-                                "vram": float(cached),
-                            }
-
-                    else:
-                        if dadapt(args.optimizer):
-                            logs = {
-                                "lr": float(dlr_unet),
-                                "loss": float(loss_step),
-                                "vram": float(cached),
-                            }
-                        else:
-                            logs = {
-                                "lr": float(last_lr),
-                                "loss": float(loss_step),
-                                "vram": float(cached),
-                            }
-
+                if (dlr_unet is not None):
+                    dlr = dlr_unet
+                elif (dlr_tenc is not None):
+                    dlr = dlr_tenc
+                     
+                if args.split_loss:
                     if dadapt(args.optimizer):
-                        status.textinfo2 = (
-                            f"Loss: {'%.2f' % loss_step}, DLR: {'{:.2E}'.format(Decimal(dlr_unet))}, "
-                            f"VRAM: {allocated}/{cached} GB"
-                        )
+                        logs = {
+                            "lr": float(dlr),
+                            "loss": float(loss_step),
+                            "inst_loss": float(instance_loss.detach().item()),
+                            "prior_loss": float(prior_loss.detach().item()),
+                            "vram": float(cached),
+                        }
                     else:
-                        status.textinfo2 = (
-                            f"Loss: {'%.2f' % loss_step}, LR: {'{:.2E}'.format(Decimal(last_lr))}, "
-                            f"VRAM: {allocated}/{cached} GB"
-                        )
-                    update_status({"status2": status.textinfo2})
-                    progress_bar.update(train_batch_size)
-                    progress_bar.set_postfix(**logs)
-                    accelerator.log(logs, step=args.revision)
+                        logs = {
+                            "lr": float(last_lr),
+                            "loss": float(loss_step),
+                            "inst_loss": float(instance_loss.detach().item()),
+                            "prior_loss": float(prior_loss.detach().item()),
+                            "vram": float(cached),
+                        }
 
-                    logs = {"epoch_loss": loss_total / len(train_dataloader)}
-                    accelerator.log(logs, step=global_step)
+                else:
+                    if dadapt(args.optimizer):
+                        logs = {
+                            "lr": float(dlr),
+                            "loss": float(loss_step),
+                            "vram": float(cached),
+                        }
+                    else:
+                        logs = {
+                            "lr": float(last_lr),
+                            "loss": float(loss_step),
+                            "vram": float(cached),
+                        }
 
-                    status.job_count = max_train_steps
-                    status.job_no = global_step
+                if dlr is not None:
+                    status.textinfo2 = (
+                        f"Loss: {'%.2f' % loss_step}, DLR: {'{:.2E}'.format(Decimal(dlr))}, "
+                        f"VRAM: {allocated}/{cached} GB"
+                    )
+                else:
+                    status.textinfo2 = (
+                        f"Loss: {'%.2f' % loss_step}, LR: {'{:.2E}'.format(Decimal(last_lr))}, "
+                        f"VRAM: {allocated}/{cached} GB"
+                    )
+                update_status({"status2": status.textinfo2})
+                progress_bar.update(train_batch_size)
+                progress_bar.set_postfix(**logs)
+                accelerator.log(logs, step=args.revision)
+
+                logs = {"epoch_loss": loss_total / len(train_dataloader)}
+                accelerator.log(logs, step=global_step)
+
+                status.job_count = max_train_steps
+                status.job_no = global_step
+
+                status.textinfo = (
+                    f"Steps: {global_step}/{max_train_steps} (Current),"
+                    f" {args.revision}/{lifetime_step + max_train_steps} (Lifetime), Epoch: {global_epoch}"
+                )
+                update_status({"progress_1_job_no": status.job_no, "progress_1_job_count": status.job_count, "status": status.textinfo})
+
+                if math.isnan(loss_step):
+                    logger.warning("Loss is NaN, your model is dead. Cancelling training.")
+                    status.interrupted = True
+                    if status_handler:
+                        status_handler.end("Training interrrupted due to NaN loss.")
+                elif  math.isnan(dlr):
+                    logger.warning("DLR is NaN. This is probably a bug in the Dadapation library. Training cancelled.")
+                    status.interrupted = True
+                    if status_handler:
+                        status_handler.end("Training interrrupted due to DLR NaN.")
+
+                # Log completion message
+                if training_complete or status.interrupted:
+                    shared.in_progress = False
+                    shared.in_progress_step = 0
+                    shared.in_progress_epoch = 0
+                    logger.debug("  Training complete (step check).")
+                    if status.interrupted:
+                        state = "canceled"
+                    else:
+                        state = "complete"
 
                     status.textinfo = (
-                        f"Steps: {global_step}/{max_train_steps} (Current),"
-                        f" {args.revision}/{lifetime_step + max_train_steps} (Lifetime), Epoch: {global_epoch}"
+                        f"Training {state} {global_step}/{max_train_steps}, {args.revision}"
+                        f" total."
                     )
-                    update_status({"progress_1_job_no": status.job_no, "progress_1_job_count": status.job_count, "status": status.textinfo})
-
-                    if math.isnan(loss_step):
-                        logger.warning("Loss is NaN, your model is dead. Cancelling training.")
-                        status.interrupted = True
-                        if status_handler:
-                            status_handler.end("Training interrrupted due to NaN loss.")
-                    elif  math.isnan(dlr_unet) or math.isnan(dlr_tenc):
-                        logger.warning("DLR is NaN. This is probably a bug in the Dadapation library. Training cancelled.")
-                        status.interrupted = True
-                        if status_handler:
-                            status_handler.end("Training interrrupted due to DLR NaN.")
-    
-
-                    # Log completion message
-                    if training_complete or status.interrupted:
-                        shared.in_progress = False
-                        shared.in_progress_step = 0
-                        shared.in_progress_epoch = 0
-                        logger.debug("  Training complete (step check).")
-                        if status.interrupted:
-                            state = "canceled"
-                        else:
-                            state = "complete"
-
-                        status.textinfo = (
-                            f"Training {state} {global_step}/{max_train_steps}, {args.revision}"
-                            f" total."
-                        )
-                        if status_handler:
-                            status_handler.end(status.textinfo)
-                        break
+                    if status_handler:
+                        status_handler.end(status.textinfo)
+                    break
 
             accelerator.wait_for_everyone()
 
@@ -1490,10 +1449,10 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                 else:
                     state = "complete"
 
-                    status.textinfo = (
-                        f"Training {state} {global_step}/{max_train_steps}, {args.revision}"
-                        f" total."
-                        )
+                status.textinfo = (
+                    f"Training {state} {global_step}/{max_train_steps}, {args.revision}"
+                    f" total."
+                )
                 if status_handler:
                     status_handler.end(status.textinfo)
                 break
@@ -1515,7 +1474,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
                                 status_handler.end("Training interrrupted.")
                             break
                         time.sleep(1)
-                        
+
         cleanup_memory()
         accelerator.end_training()
         result.msg = msg
