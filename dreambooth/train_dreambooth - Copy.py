@@ -67,7 +67,7 @@ from lora_diffusion.lora import (
     get_target_module,
     set_lora_requires_grad,
 )
-import random
+
 logger = logging.getLogger(__name__)
 # define a Handler which writes DEBUG messages or higher to the sys.stderr
 dl.set_verbosity_error()
@@ -1172,10 +1172,7 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             "iterations_per_second": 0.0,
             "vram": round(torch.cuda.memory_reserved(0) / 1024 ** 3, 1)
         }
-        
         for epoch in range(first_epoch, max_train_epochs):
-            
-
             if training_complete:
                 logger.debug("Training complete, breaking epoch.")
                 break
@@ -1212,357 +1209,284 @@ def main(class_gen_method: str = "Native Diffusers", user: str = None) -> TrainR
             current_prior_loss_weight = current_prior_loss(
                 args, current_epoch=global_epoch
             )
-            def do_stuff(stuff_list):
-                batchs_with_loss = []
-                nonlocal resume_from_checkpoint
-                nonlocal epoch
-                nonlocal first_epoch
-                nonlocal resume_step
-                nonlocal progress_bar
-                nonlocal train_batch_size
-                nonlocal max_train_steps
-                nonlocal stats
-                nonlocal accelerator
-                nonlocal unet
-                nonlocal text_encoder
-                nonlocal args
-                nonlocal global_step
-                nonlocal loss_total
-                
-                for step, batch in enumerate(stuff_list):
-                    # Skip steps until we reach the resumed step
-                    if (
-                            resume_from_checkpoint
-                            and epoch == first_epoch
-                            and step < resume_step
-                    ):
-                        progress_bar.update(train_batch_size)
-                        progress_bar.reset()
-                        status.job_count = max_train_steps
-                        status.job_no += train_batch_size
-                        stats["session_step"] += train_batch_size
-                        stats["lifetime_step"] += train_batch_size
-                        update_status(stats)
-                        continue
-                    with accelerator.accumulate(unet), accelerator.accumulate(text_encoder):
-                        # Convert images to latent space
-                        with torch.no_grad():
-                            if args.cache_latents:
-                                latents = batch["images"].to(accelerator.device)
-                            else:
-                                latents = vae.encode(
-                                    batch["images"].to(dtype=weight_dtype)
-                                ).latent_dist.sample()
-                            latents = latents * 0.18215
-
-                        # Sample noise that we'll add to the latents
-                        if args.offset_noise < 0:
-                            noise = torch.randn_like(latents, device=latents.device)
-                        else:
-                            noise = torch.randn_like(
-                                latents, device=latents.device
-                            ) + args.offset_noise * torch.randn(
-                                latents.shape[0],
-                                latents.shape[1],
-                                1,
-                                1,
-                                device=latents.device,
-                            )
-                        b_size = latents.shape[0]
-
-                        # Sample a random timestep for each image
-                        timesteps = torch.randint(
-                            0,
-                            noise_scheduler.config.num_train_timesteps,
-                            (b_size,),
-                            device=latents.device,
-                        )
-                        timesteps = timesteps.long()
-
-                        # Add noise to the latents according to the noise magnitude at each timestep
-                        # (this is the forward diffusion process)
-                        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                        pad_tokens = args.pad_tokens if train_tenc else False
-                        encoder_hidden_states = encode_hidden_state(
-                            text_encoder,
-                            batch["input_ids"],
-                            pad_tokens,
-                            b_size,
-                            args.max_token_length,
-                            tokenizer.model_max_length,
-                            args.clip_skip,
-                        )
-
-                        # Predict the noise residual
-                        if args.use_ema and args.ema_predict:
-                            noise_pred = ema_model(
-                                noisy_latents, timesteps, encoder_hidden_states
-                            ).sample
-                        else:
-                            noise_pred = unet(
-                                noisy_latents, timesteps, encoder_hidden_states
-                            ).sample
-
-                        # Get the target for loss depending on the prediction type
-                        if noise_scheduler.config.prediction_type == "v_prediction":
-                            target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                        else:
-                            target = noise
-
-                        if not args.split_loss:
-                            loss = instance_loss = torch.nn.functional.mse_loss(
-                                noise_pred.float(), target.float(), reduction="mean"
-                            )
-                            loss *= batch["loss_avg"]
-
-                        else:
-                            model_pred_chunks = torch.split(noise_pred, 1, dim=0)
-                            target_pred_chunks = torch.split(target, 1, dim=0)
-                            instance_chunks = []
-                            prior_chunks = []
-                            instance_pred_chunks = []
-                            prior_pred_chunks = []
-
-                            # Iterate over the list of boolean values in batch["types"]
-                            for i, is_prior in enumerate(batch["types"]):
-                                # If is_prior is False, append the corresponding chunk to instance_chunks
-                                if not is_prior:
-                                    instance_chunks.append(model_pred_chunks[i])
-                                    instance_pred_chunks.append(target_pred_chunks[i])
-                                # If is_prior is True, append the corresponding chunk to prior_chunks
-                                else:
-                                    prior_chunks.append(model_pred_chunks[i])
-                                    prior_pred_chunks.append(target_pred_chunks[i])
-
-                            # initialize with 0 in case we are having batch = 1
-                            instance_loss = torch.tensor(0)
-                            prior_loss = torch.tensor(0)
-
-                            # Concatenate the chunks in instance_chunks to form the model_pred_instance tensor
-                            if len(instance_chunks):
-                                model_pred = torch.stack(instance_chunks, dim=0)
-                                target = torch.stack(instance_pred_chunks, dim=0)
-                                instance_loss = torch.nn.functional.mse_loss(
-                                    model_pred.float(), target.float(), reduction="mean"
-                                )
-
-                            if len(prior_pred_chunks):
-                                model_pred_prior = torch.stack(prior_chunks, dim=0)
-                                target_prior = torch.stack(prior_pred_chunks, dim=0)
-                                prior_loss = torch.nn.functional.mse_loss(
-                                    model_pred_prior.float(),
-                                    target_prior.float(),
-                                    reduction="mean",
-                                )
-
-                            if len(instance_chunks) and len(prior_chunks):
-                                # Add the prior loss to the instance loss.
-                                loss = instance_loss + current_prior_loss_weight * prior_loss
-                            elif len(instance_chunks):
-                                loss = instance_loss
-                            else:
-                                loss = prior_loss * current_prior_loss_weight
-
-                        accelerator.backward(loss)
-
-                        if accelerator.sync_gradients and not args.use_lora:
-                            if train_tenc:
-                                params_to_clip = itertools.chain(unet.parameters(), text_encoder.parameters())
-                            else:
-                                params_to_clip = unet.parameters()
-                            accelerator.clip_grad_norm_(params_to_clip, 1)
-
-                        optimizer.step()
-                        lr_scheduler.step(train_batch_size)
-                        if args.use_ema and ema_model is not None:
-                            ema_model.step(unet)
-                        if profiler is not None:
-                            profiler.step()
-
-                        optimizer.zero_grad(set_to_none=args.gradient_set_to_none)
-
-                        # Track current step and epoch for OOM resume
-                        # shared.in_progress_epoch = global_epoch
-                        # shared.in_progress_steps = global_step
-
-                    allocated = round(torch.cuda.memory_allocated(0) / 1024 ** 3, 1)
-                    cached = round(torch.cuda.memory_reserved(0) / 1024 ** 3, 1)
-                    lr_data = lr_scheduler.get_last_lr()
-                    last_lr = lr_data[0]
-                    last_tenc_lr = 0
-                    stats["lr_data"] = lr_data
-                    try:
-                        if len(optimizer.param_groups) > 1:
-                            last_tenc_lr = optimizer.param_groups[1]["lr"] if train_tenc else 0
-                    except:
-                        logger.debug("Exception getting tenc lr")
-                        pass
-
-                    if 'adapt' in args.optimizer:
-                        last_lr = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
-                        if len(optimizer.param_groups) > 1:
-                            try:
-                                last_tenc_lr = optimizer.param_groups[1]["d"] * optimizer.param_groups[1]["lr"]
-                            except:
-                                logger.warning("Exception setting tenc weight decay")
-                                traceback.print_exc()
-
-                    update_status(stats)
-                    del noise_pred
-                    del latents
-                    del encoder_hidden_states
-                    del noise
-                    del timesteps
-                    del noisy_latents
-                    del target
-
-                    global_step += train_batch_size
-                    args.revision += train_batch_size
+            for step, batch in enumerate(train_dataloader):
+                # Skip steps until we reach the resumed step
+                if (
+                        resume_from_checkpoint
+                        and epoch == first_epoch
+                        and step < resume_step
+                ):
+                    progress_bar.update(train_batch_size)
+                    progress_bar.reset()
+                    status.job_count = max_train_steps
                     status.job_no += train_batch_size
-                    loss_step = loss.detach().item()
-                    loss_total += loss_step
-
                     stats["session_step"] += train_batch_size
                     stats["lifetime_step"] += train_batch_size
-                    stats["loss"] = loss_step
-
-                    logs = {
-                        "lr": float(last_lr),
-                        "loss": float(loss_step),
-                        "vram": float(cached),
-                    }
-
-                    stats["vram"] = logs["vram"]
-                    stats["unet_lr"] = '{:.2E}'.format(Decimal(last_lr))
-                    stats["tenc_lr"] = '{:.2E}'.format(Decimal(last_tenc_lr))
-
-                    if args.split_loss:
-                        logs["inst_loss"] = float(instance_loss.detach().item())
-                        logs["prior_loss"] = float(prior_loss.detach().item())
-                        stats["instance_loss"] = logs["inst_loss"]
-                        stats["prior_loss"] = logs["prior_loss"]
-
-                        batchs_with_loss.append([batch,logs["inst_loss"]])
-
-                    if 'adapt' in args.optimizer:
-                        status.textinfo2 = (
-                            f"Loss: {'%.2f' % loss_step}, UNET DLR: {'{:.2E}'.format(Decimal(last_lr))}, TENC DLR: {'{:.2E}'.format(Decimal(last_tenc_lr))}, "
-                            f"VRAM: {allocated}/{cached} GB"
-                        )
-                    else:
-                        status.textinfo2 = (
-                            f"Loss: {'%.2f' % loss_step}, LR: {'{:.2E}'.format(Decimal(last_lr))}, "
-                            f"VRAM: {allocated}/{cached} GB"
-                        )
-
-                    progress_bar.update(train_batch_size)
-                    rate = progress_bar.format_dict["rate"] if "rate" in progress_bar.format_dict else None
-                    if rate is None:
-                        rate_string = ""
-                    else:
-                        if rate > 1:
-                            rate_string = f"{rate:.2f} it/s"
-                        else:
-                            rate_string = f"{1 / rate:.2f} s/it" if rate != 0 else "N/A"
-                    stats["iterations_per_second"] = rate_string
-                    progress_bar.set_postfix(**logs)
-                    accelerator.log(logs, step=args.revision)
-
-                    logs = {"epoch_loss": loss_total / len(train_dataloader)}
-                    accelerator.log(logs, step=global_step)
-                    stats["epoch_loss"] = '%.2f' % (loss_total / len(train_dataloader))
-
-                    status.job_count = max_train_steps
-                    status.job_no = global_step
-                    stats["lifetime_step"] = args.revision
-                    stats["session_step"] = global_step
-                    # status0 = f"Steps: {global_step}/{max_train_steps} (Current), {rate_string}"
-                    # status1 = f"{args.revision}/{lifetime_step + max_train_steps} (Lifetime), Epoch: {global_epoch}"
-                    status.textinfo = (
-                        f"Steps: {global_step}/{max_train_steps} (Current), {rate_string}"
-                        f" {args.revision}/{lifetime_step + max_train_steps} (Lifetime), Epoch: {global_epoch}"
-                    )
                     update_status(stats)
-
-                    if math.isnan(loss_step):
-                        logger.warning("Loss is NaN, your model is dead. Cancelling training.")
-                        status.interrupted = True
-                        if status_handler:
-                            status_handler.end("Training interrrupted due to NaN loss.")
-
-                    # Log completion message
-                    if training_complete or status.interrupted:
-                        shared.in_progress = False
-                        shared.in_progress_step = 0
-                        shared.in_progress_epoch = 0
-                        logger.debug("  Training complete (step check).")
-                        if status.interrupted:
-                            state = "canceled"
+                    continue
+                with accelerator.accumulate(unet), accelerator.accumulate(text_encoder):
+                    # Convert images to latent space
+                    with torch.no_grad():
+                        if args.cache_latents:
+                            latents = batch["images"].to(accelerator.device)
                         else:
-                            state = "complete"
+                            latents = vae.encode(
+                                batch["images"].to(dtype=weight_dtype)
+                            ).latent_dist.sample()
+                        latents = latents * 0.18215
 
-                        status.textinfo = (
-                            f"Training {state} {global_step}/{max_train_steps}, {args.revision}"
-                            f" total."
+                    # Sample noise that we'll add to the latents
+                    if args.offset_noise < 0:
+                        noise = torch.randn_like(latents, device=latents.device)
+                    else:
+                        noise = torch.randn_like(
+                            latents, device=latents.device
+                        ) + args.offset_noise * torch.randn(
+                            latents.shape[0],
+                            latents.shape[1],
+                            1,
+                            1,
+                            device=latents.device,
                         )
-                        if status_handler:
-                            status_handler.end(status.textinfo)
-                        break
-                
-                return batchs_with_loss    
-            train_dataloader_original = train_dataloader
-            while True:
-                print(f"\nEntering while loop. Current data count: {len(list(enumerate(train_dataloader)))}")
-                REMOVED_BATCH_LOSS_THRESHOLD = 0.2
-                list_of_batches_and_their_loss = do_stuff(train_dataloader)
-                #remove batches with loss below 0.01
-                batches_with_loss_higher_than_threshold = [x for x in list_of_batches_and_their_loss if x[1] > REMOVED_BATCH_LOSS_THRESHOLD]
-                batches_removed_this_iteration = [x[0] for x in list_of_batches_and_their_loss if x[1] <= REMOVED_BATCH_LOSS_THRESHOLD]
-                #batches_removed += batches_removed_this_iteration
-                print(f"\nBatch Count change (due to near zero loss datas) from {len(list(enumerate(train_dataloader)))} to {len(batches_with_loss_higher_than_threshold)}")
+                    b_size = latents.shape[0]
 
-                train_dataloader = [x[0] for x in batches_with_loss_higher_than_threshold]
-                if(train_dataloader == []):
-                    print(f"\nNo batches left to train. Need to start the process again.")
-                    train_dataloader = train_dataloader_original
-                    #batches_removed = []
+                    # Sample a random timestep for each image
+                    timesteps = torch.randint(
+                        0,
+                        noise_scheduler.config.num_train_timesteps,
+                        (b_size,),
+                        device=latents.device,
+                    )
+                    timesteps = timesteps.long()
+
+                    # Add noise to the latents according to the noise magnitude at each timestep
+                    # (this is the forward diffusion process)
+                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                    pad_tokens = args.pad_tokens if train_tenc else False
+                    encoder_hidden_states = encode_hidden_state(
+                        text_encoder,
+                        batch["input_ids"],
+                        pad_tokens,
+                        b_size,
+                        args.max_token_length,
+                        tokenizer.model_max_length,
+                        args.clip_skip,
+                    )
+
+                    # Predict the noise residual
+                    if args.use_ema and args.ema_predict:
+                        noise_pred = ema_model(
+                            noisy_latents, timesteps, encoder_hidden_states
+                        ).sample
+                    else:
+                        noise_pred = unet(
+                            noisy_latents, timesteps, encoder_hidden_states
+                        ).sample
+
+                    # Get the target for loss depending on the prediction type
+                    if noise_scheduler.config.prediction_type == "v_prediction":
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    else:
+                        target = noise
+
+                    if not args.split_loss:
+                        loss = instance_loss = torch.nn.functional.mse_loss(
+                            noise_pred.float(), target.float(), reduction="mean"
+                        )
+                        loss *= batch["loss_avg"]
+
+                    else:
+                        model_pred_chunks = torch.split(noise_pred, 1, dim=0)
+                        target_pred_chunks = torch.split(target, 1, dim=0)
+                        instance_chunks = []
+                        prior_chunks = []
+                        instance_pred_chunks = []
+                        prior_pred_chunks = []
+
+                        # Iterate over the list of boolean values in batch["types"]
+                        for i, is_prior in enumerate(batch["types"]):
+                            # If is_prior is False, append the corresponding chunk to instance_chunks
+                            if not is_prior:
+                                instance_chunks.append(model_pred_chunks[i])
+                                instance_pred_chunks.append(target_pred_chunks[i])
+                            # If is_prior is True, append the corresponding chunk to prior_chunks
+                            else:
+                                prior_chunks.append(model_pred_chunks[i])
+                                prior_pred_chunks.append(target_pred_chunks[i])
+
+                        # initialize with 0 in case we are having batch = 1
+                        instance_loss = torch.tensor(0)
+                        prior_loss = torch.tensor(0)
+
+                        # Concatenate the chunks in instance_chunks to form the model_pred_instance tensor
+                        if len(instance_chunks):
+                            model_pred = torch.stack(instance_chunks, dim=0)
+                            target = torch.stack(instance_pred_chunks, dim=0)
+                            instance_loss = torch.nn.functional.mse_loss(
+                                model_pred.float(), target.float(), reduction="mean"
+                            )
+
+                        if len(prior_pred_chunks):
+                            model_pred_prior = torch.stack(prior_chunks, dim=0)
+                            target_prior = torch.stack(prior_pred_chunks, dim=0)
+                            prior_loss = torch.nn.functional.mse_loss(
+                                model_pred_prior.float(),
+                                target_prior.float(),
+                                reduction="mean",
+                            )
+
+                        if len(instance_chunks) and len(prior_chunks):
+                            # Add the prior loss to the instance loss.
+                            loss = instance_loss + current_prior_loss_weight * prior_loss
+                        elif len(instance_chunks):
+                            loss = instance_loss
+                        else:
+                            loss = prior_loss * current_prior_loss_weight
+
+                    accelerator.backward(loss)
+
+                    if accelerator.sync_gradients and not args.use_lora:
+                        if train_tenc:
+                            params_to_clip = itertools.chain(unet.parameters(), text_encoder.parameters())
+                        else:
+                            params_to_clip = unet.parameters()
+                        accelerator.clip_grad_norm_(params_to_clip, 1)
+
+                    optimizer.step()
+                    lr_scheduler.step(train_batch_size)
+                    if args.use_ema and ema_model is not None:
+                        ema_model.step(unet)
+                    if profiler is not None:
+                        profiler.step()
+
+                    optimizer.zero_grad(set_to_none=args.gradient_set_to_none)
+
+                    # Track current step and epoch for OOM resume
+                    # shared.in_progress_epoch = global_epoch
+                    # shared.in_progress_steps = global_step
+
+                allocated = round(torch.cuda.memory_allocated(0) / 1024 ** 3, 1)
+                cached = round(torch.cuda.memory_reserved(0) / 1024 ** 3, 1)
+                lr_data = lr_scheduler.get_last_lr()
+                last_lr = lr_data[0]
+                last_tenc_lr = 0
+                stats["lr_data"] = lr_data
+                try:
+                    if len(optimizer.param_groups) > 1:
+                        last_tenc_lr = optimizer.param_groups[1]["lr"] if train_tenc else 0
+                except:
+                    logger.debug("Exception getting tenc lr")
+                    pass
+
+                if 'adapt' in args.optimizer:
+                    last_lr = optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
+                    if len(optimizer.param_groups) > 1:
+                        try:
+                            last_tenc_lr = optimizer.param_groups[1]["d"] * optimizer.param_groups[1]["lr"]
+                        except:
+                            logger.warning("Exception setting tenc weight decay")
+                            traceback.print_exc()
+
+                update_status(stats)
+                del noise_pred
+                del latents
+                del encoder_hidden_states
+                del noise
+                del timesteps
+                del noisy_latents
+                del target
+
+                global_step += train_batch_size
+                args.revision += train_batch_size
+                status.job_no += train_batch_size
+                loss_step = loss.detach().item()
+                loss_total += loss_step
+
+                stats["session_step"] += train_batch_size
+                stats["lifetime_step"] += train_batch_size
+                stats["loss"] = loss_step
+
+                logs = {
+                    "lr": float(last_lr),
+                    "loss": float(loss_step),
+                    "vram": float(cached),
+                }
+
+                stats["vram"] = logs["vram"]
+                stats["unet_lr"] = '{:.2E}'.format(Decimal(last_lr))
+                stats["tenc_lr"] = '{:.2E}'.format(Decimal(last_tenc_lr))
+
+                if args.split_loss:
+                    logs["inst_loss"] = float(instance_loss.detach().item())
+                    logs["prior_loss"] = float(prior_loss.detach().item())
+                    stats["instance_loss"] = logs["inst_loss"]
+                    stats["prior_loss"] = logs["prior_loss"]
+
+                if 'adapt' in args.optimizer:
+                    status.textinfo2 = (
+                        f"Loss: {'%.2f' % loss_step}, UNET DLR: {'{:.2E}'.format(Decimal(last_lr))}, TENC DLR: {'{:.2E}'.format(Decimal(last_tenc_lr))}, "
+                        f"VRAM: {allocated}/{cached} GB"
+                    )
+                else:
+                    status.textinfo2 = (
+                        f"Loss: {'%.2f' % loss_step}, LR: {'{:.2E}'.format(Decimal(last_lr))}, "
+                        f"VRAM: {allocated}/{cached} GB"
+                    )
+
+                progress_bar.update(train_batch_size)
+                rate = progress_bar.format_dict["rate"] if "rate" in progress_bar.format_dict else None
+                if rate is None:
+                    rate_string = ""
+                else:
+                    if rate > 1:
+                        rate_string = f"{rate:.2f} it/s"
+                    else:
+                        rate_string = f"{1 / rate:.2f} s/it" if rate != 0 else "N/A"
+                stats["iterations_per_second"] = rate_string
+                progress_bar.set_postfix(**logs)
+                accelerator.log(logs, step=args.revision)
+
+                logs = {"epoch_loss": loss_total / len(train_dataloader)}
+                accelerator.log(logs, step=global_step)
+                stats["epoch_loss"] = '%.2f' % (loss_total / len(train_dataloader))
+
+                status.job_count = max_train_steps
+                status.job_no = global_step
+                stats["lifetime_step"] = args.revision
+                stats["session_step"] = global_step
+                # status0 = f"Steps: {global_step}/{max_train_steps} (Current), {rate_string}"
+                # status1 = f"{args.revision}/{lifetime_step + max_train_steps} (Lifetime), Epoch: {global_epoch}"
+                status.textinfo = (
+                    f"Steps: {global_step}/{max_train_steps} (Current), {rate_string}"
+                    f" {args.revision}/{lifetime_step + max_train_steps} (Lifetime), Epoch: {global_epoch}"
+                )
+                update_status(stats)
+
+                if math.isnan(loss_step):
+                    logger.warning("Loss is NaN, your model is dead. Cancelling training.")
+                    status.interrupted = True
+                    if status_handler:
+                        status_handler.end("Training interrrupted due to NaN loss.")
+
+                # Log completion message
+                if training_complete or status.interrupted:
+                    shared.in_progress = False
+                    shared.in_progress_step = 0
+                    shared.in_progress_epoch = 0
+                    logger.debug("  Training complete (step check).")
+                    if status.interrupted:
+                        state = "canceled"
+                    else:
+                        state = "complete"
+
+                    status.textinfo = (
+                        f"Training {state} {global_step}/{max_train_steps}, {args.revision}"
+                        f" total."
+                    )
+                    if status_handler:
+                        status_handler.end(status.textinfo)
                     break
 
-                allowed_upper_bound_percentage = 1.3 #30% difference is allowed 
-                #get average loss (second element of each batchs_with_loss)
-                avg_loss = sum([x[1] for x in batches_with_loss_higher_than_threshold])/len(batches_with_loss_higher_than_threshold)
-                upper_bound = avg_loss * allowed_upper_bound_percentage
-                #get lowest loss from batchs_with_loss
-                lowest_loss = min([x[1] for x in batches_with_loss_higher_than_threshold])
-                #get highest loss from batchs_with_loss
-                highest_loss = max([x[1] for x in batches_with_loss_higher_than_threshold])
-
-                batchs_with_higher_loss = [x for x in batches_with_loss_higher_than_threshold if x[1] > upper_bound]
-                #get batchs with loss higher than allowed_loss
-                outlier_existed = len(batchs_with_higher_loss) != 0
-                print(f"\nAverage loss: {avg_loss}")
-                print(f"Lowest loss: {lowest_loss} Highest loss: {highest_loss} Allowed upper bound: {upper_bound}")
-                print(f"Batchs with higher loss: {len(batchs_with_higher_loss)}")
-
-                if(len(batchs_with_higher_loss) == 0):
-                    print(f"\nNo batchs with loss higher than allowed upper bound, finishing current epoch.")
-                    break
-                print(f"\nFound {len(batchs_with_higher_loss)} batchs with loss higher than allowed upper bound. Normalizing deviations...")
-
-                while(len(batchs_with_higher_loss) != 0):
-                    print(f"\nNormalizing deviations to be within average loss range: {len(batchs_with_higher_loss)}")
-                    #shuffle batchs_with_higher_loss before doing stuff, might improve the training?
-                    random.shuffle(batchs_with_higher_loss)
-                    batchs_with_higher_loss = do_stuff([x[0] for x in batchs_with_higher_loss])
-                    batchs_with_higher_loss = [x for x in batchs_with_higher_loss if x[1] > avg_loss]
-
-                if(outlier_existed):
-                    print(f"\nOutliers existed, but now they are gone. Continuing training...")
-                
-
-                
-            
-            train_dataloader = train_dataloader_original 
             accelerator.wait_for_everyone()
 
             args.epoch += 1

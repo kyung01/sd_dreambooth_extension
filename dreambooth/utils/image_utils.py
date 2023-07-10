@@ -172,7 +172,8 @@ class FilenameTextGetter:
 
         if os.path.exists(text_filename):
             with open(text_filename, "r", encoding="utf8") as file:
-                filename_text = file.read().strip()
+                filename_text = file.read()
+        
         else:
             filename_text = os.path.splitext(filename)[0]
             filename_text = re.sub(self.re_numbers_at_start, '', filename_text)
@@ -183,6 +184,12 @@ class FilenameTextGetter:
         return filename_text
 
     def create_text(self, prompt, file_text, concept, is_class=True):
+        #read first line of file_text
+        first_line = file_text.split("\n")[0]
+        is_sentence = first_line == "SENTENCE"
+        #remove first line from file_text
+        file_text = "\n".join(file_text.split("\n")[1:])
+
         instance_token = concept.instance_token
         class_token = concept.class_token
         output = prompt.replace("[filewords]", file_text)
@@ -231,14 +238,15 @@ class FilenameTextGetter:
         output = re.sub(r"\s+", " ", output)
         output = re.sub(r"\\", "", output)
 
-        if self.shuffle_tags:
+        if not is_sentence and self.shuffle_tags:
             output = shuffle_tags(output)
         else:
             output = output.strip()
 
         return output
 
-
+# Original code
+"""
 def shuffle_tags(caption: str):
     tags = caption.split(',')
     first_tag = tags.pop(0)
@@ -246,7 +254,70 @@ def shuffle_tags(caption: str):
     tags.insert(0, first_tag)
     output = ','.join(tags).strip()
     return output
+"""
 
+def shuffle_words_within_ands(sentence):
+    words_within_ands = re.findall(r"(.*?)(\b\w+\b(?:\W*&\W*\b\w+\b)*)", sentence)
+    for i, (prefix, words) in enumerate(words_within_ands):
+        shuffled_words = re.sub(r"\b(\w+)\b", r"\1__placeholder__", words)
+        shuffled_words = shuffled_words.split('&')
+        random.shuffle(shuffled_words)
+        shuffled_words = "&".join(shuffled_words)
+        shuffled_words = re.sub(r"(\w+)__placeholder__", r"\1", shuffled_words)
+        words_within_ands[i] = (prefix, shuffled_words)
+    shuffled_sentence = "".join(prefix + words for prefix, words in words_within_ands)
+    return shuffled_sentence
+
+def shuffle_natural_language(caption: str):
+
+    sentences = [c.strip() for c in caption.split('.')]
+    selected_sentence = random.choice(sentences)
+    output = shuffle_words_within_ands(selected_sentence)
+    return output
+
+def shuffle_tags_old(caption: str):
+    if random.random() < 0.5:
+            caption = caption.replace("dick", "penis")
+  
+    # Remove the last character if it is a "."
+    caption  = caption.strip()
+    if caption[-1] == ".":
+        caption = caption[:-1]
+
+    # Split the caption by "." and strip each element
+    captions = [c.strip() for c in caption.split('.')]
+
+    # Split each caption by "," and strip each element
+    for i, sentence in enumerate(captions):
+        tags = [t.strip() for t in sentence.split(',')]
+        
+        # preserve the first word because it means something
+        first_tag = tags.pop(0)
+        # Shuffle the tags
+        random.shuffle(tags)
+        tags.insert(0, first_tag)
+
+        # Put the tags back together with ", "
+        captions[i] = ', '.join(tags)
+
+    # Shuffle the captions
+    # Don't shuffle the captions 
+    #random.shuffle(captions)
+
+    # Put the captions back together with ". "
+    output = '. '.join(captions).strip() + "." #add the last dot to end
+    output = shuffle_words_within_ands(output)
+    return output
+
+def shuffle_tags(caption: str):
+    #split caption by "," and strip each element
+    tags = [t.strip() for t in caption.split(',')]
+    #shuffle the tags
+    random.shuffle(tags)
+    #put the tags back together with ", "
+    output = ', '.join(tags)
+    output = shuffle_words_within_ands(output)
+    return output
 
 def get_scheduler_names():
     return [scheduler.name.replace('Scheduler', '') for scheduler in KarrasDiffusionSchedulers]
@@ -444,7 +515,7 @@ def load_image_directory(db_dir, concept: Concept, is_class: bool = True) -> Lis
 
     return list(zip(img_paths, captions))
 
-
+# my code
 def open_and_trim(image_path: str, reso: Tuple[int, int], return_pil: bool = False) -> Union[np.ndarray, Image]:
     # Open image with PIL
     image = Image.open(image_path)
@@ -459,18 +530,30 @@ def open_and_trim(image_path: str, reso: Tuple[int, int], return_pil: bool = Fal
             image = bg
         image = image.convert("RGB")
 
-    # Upscale image if necessary
-    scale_factor = max(reso[0] / image.width, reso[1] / image.height)
-    if scale_factor != 1:
-        new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
+    # Upscale or downscale if necessary
+    if image.width != reso[0] or image.height != reso[1]:
+        if image.width > reso[0] or image.height > reso[1]:
+            # Image is larger, downscale
+            scale_factor = min(reso[0] / image.width, reso[1] / image.height)
+            new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
+        else:
+            # Image is smaller, upscale
+            scale_factor = max(reso[0] / image.width, reso[1] / image.height)
+            new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
+        
         image = image.resize(new_size, resample=Image.LANCZOS)
 
-    # Crop image to target resolution
-    if image.width != reso[0] or image.height != reso[1]:
-        w = int((image.width - reso[0]) / 2)
-        h = int((image.height - reso[1]) / 2)
-        box = (w, h, reso[0] + w, reso[1] + h)
-        image = image.crop(box)
+    # Calculate the offset to center the image
+    offset_x = (reso[0] - image.width) // 2
+    offset_y = (reso[1] - image.height) // 2
+
+    # Create a background image with the target resolution
+    background = Image.new("RGB", reso, (255, 255, 255))
+
+    # Paste the image onto the background with the calculated offset
+    background.paste(image, (offset_x, offset_y))
+
+    image = background
 
     # Return as np array or PIL image
     if return_pil:
